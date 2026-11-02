@@ -1,6 +1,5 @@
-from typing import Type
+from typing import Optional, Type
 
-import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -15,7 +14,7 @@ class Ensemble(nn.Module):
         ensemble = nn.vmap(
             self.net_cls,
             variable_axes={"params": 0},
-            split_rngs={"params": True, "dropout": True},
+            split_rngs={"params": True},
             in_axes=None,
             out_axes=0,
             axis_size=self.num,
@@ -23,16 +22,12 @@ class Ensemble(nn.Module):
         return ensemble()(*args)
 
 
-def subsample_ensemble(key: jax.random.PRNGKey, params, num_sample: int, num_qs: int):
+def subsample_ensemble(
+    key: jax.Array, params, num_sample: Optional[int], num_qs: int
+):
+    """Picks num_sample random ensemble members (REDQ); None keeps all."""
     if num_sample is not None:
         all_indx = jnp.arange(0, num_qs)
         indx = jax.random.choice(key, a=all_indx, shape=(num_sample,), replace=False)
-
-        if "Ensemble_0" in params:
-            ens_params = jax.tree_util.tree_map(
-                lambda param: param[indx], params["Ensemble_0"]
-            )
-            params = flax.core.copy(params, add_or_replace={"Ensemble_0": ens_params})
-        else:
-            params = jax.tree_util.tree_map(lambda param: param[indx], params)
+        params = jax.tree_util.tree_map(lambda param: param[indx], params)
     return params

@@ -1,9 +1,6 @@
-import collections
-from typing import Optional, Union
+from typing import Union
 
 import gymnasium as gym
-import gymnasium.spaces
-import jax
 import numpy as np
 
 from rlpd.data.dataset import Dataset, DatasetDict
@@ -42,13 +39,9 @@ class ReplayBuffer(Dataset):
         observation_space: gym.Space,
         action_space: gym.Space,
         capacity: int,
-        next_observation_space: Optional[gym.Space] = None,
     ):
-        if next_observation_space is None:
-            next_observation_space = observation_space
-
         observation_data = _init_replay_dict(observation_space, capacity)
-        next_observation_data = _init_replay_dict(next_observation_space, capacity)
+        next_observation_data = _init_replay_dict(observation_space, capacity)
         dataset_dict = dict(
             observations=observation_data,
             next_observations=next_observation_data,
@@ -72,19 +65,3 @@ class ReplayBuffer(Dataset):
 
         self._insert_index = (self._insert_index + 1) % self._capacity
         self._size = min(self._size + 1, self._capacity)
-
-    def get_iterator(self, queue_size: int = 2, sample_args: dict = {}):
-        # See https://flax.readthedocs.io/en/latest/_modules/flax/jax_utils.html#prefetch_to_device
-        # queue_size = 2 should be ok for one GPU.
-
-        queue = collections.deque()
-
-        def enqueue(n):
-            for _ in range(n):
-                data = self.sample(**sample_args)
-                queue.append(jax.device_put(data))
-
-        enqueue(queue_size)
-        while queue:
-            yield queue.popleft()
-            enqueue(1)

@@ -16,8 +16,6 @@ imageio >= 2.30
 gymnasium[mujoco] >= 1.4, < 2
 gymnasium-robotics >= 1.4  # AntMaze and Adroit environments
 minari[arrow,hdf5,hf] >= 0.5.4  # D4RL datasets, re-hosted
-dm_control >= 1.0.50
-shimmy[dm-control] >= 2.0.1  # dm_control as gymnasium envs (pixel experiments)
 
 # Tests
 pytest >= 8

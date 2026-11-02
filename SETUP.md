@@ -83,25 +83,11 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning.py \
     --project_name=rlpd_antmaze
 ```
 
-### V-D4RL (pixels)
+### Evaluation videos
 
-In WSL, set `MUJOCO_GL=egl` for headless rendering. On Windows the default
+`--save_video=True` logs one evaluation episode per evaluation to wandb. In
+WSL, also set `MUJOCO_GL=egl` for headless rendering; on Windows the default
 works.
-
-Download the `64px` main datasets from
-[Hugging Face](https://huggingface.co/datasets/conglu/vd4rl) into `~/.vd4rl`,
-so that, for example, the medium cheetah-run `.npz` files are in
-`~/.vd4rl/main/cheetah_run/medium/64px`.
-
-```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning_pixels.py \
-    --env_name=dm_control/cheetah-run-v0 \
-    --dataset_level=medium \
-    --start_training 5000 \
-    --max_steps 300000 \
-    --config=configs/rlpd_pixels_config.py \
-    --project_name=rlpd_vd4rl
-```
 
 ## Changes from upstream RLPD
 
@@ -112,13 +98,14 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning_pixels.py \
   Minari's `mujoco/*` datasets were re-collected with the current MuJoCo
   environments, so scores are not directly comparable with the paper's D4RL
   numbers.
-- `dmcgym` → `shimmy`. Pixel environments are named `dm_control/<domain>-<task>-v0`.
 - `tensorflow-probability` → a small tanh-Gaussian in
   `rlpd/distributions/tanh_normal.py`; TFP's JAX backend no longer imports with
   current JAX. The math is the same, but random draws differ from upstream's.
-- DrQ's target critic is now built with `num_min_qs` members, as SAC's already
-  was; current Flax rejects the old mismatch under `configs/rlpd_pixels_config.py`.
 - Removed the AWAC Adroit "binary" datasets (`--env_name=pen-binary-v0`, etc.).
   They need `mj_envs`, which is built on `mujoco-py` and does not install on
   current Python. Minari's `D4RL/pen/*`, `D4RL/door/*`, ... Adroit datasets
   work with `train_finetuning.py`.
+- Removed what this project does not use: the pixel pipeline (DrQ,
+  `train_finetuning_pixels.py`, V-D4RL loading, frame stacking), RLPD's
+  ablation options (critic dropout, weight decay, ResNet critic, p-norm), and
+  unused dataset helpers. They are in the upstream repository if needed.

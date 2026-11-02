@@ -3,7 +3,6 @@
 from functools import partial
 from typing import Dict, Optional, Sequence, Tuple
 
-import flax
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
@@ -15,22 +14,7 @@ from rlpd.agents.agent import Agent
 from rlpd.agents.sac.temperature import Temperature
 from rlpd.data.dataset import DatasetDict
 from rlpd.distributions import TanhNormal
-from rlpd.networks import (
-    MLP,
-    Ensemble,
-    MLPResNetV2,
-    StateActionValue,
-    subsample_ensemble,
-)
-
-
-# From https://colab.research.google.com/github/huggingface/notebooks/blob/master/examples/text_classification_flax.ipynb#scrollTo=ap-zaOyKJDXM
-def decay_mask_fn(params):
-    flat_params = flax.traverse_util.flatten_dict(params)
-    flat_mask = {path: path[-1] != "bias" for path in flat_params}
-    # Flax now initializes params as plain dicts; optax needs the mask to have
-    # the same container types as the params.
-    return flax.traverse_util.unflatten_dict(flat_mask)
+from rlpd.networks import MLP, Ensemble, StateActionValue, subsample_ensemble
 
 
 class SACLearner(Agent):
@@ -60,14 +44,10 @@ class SACLearner(Agent):
         tau: float = 0.005,
         num_qs: int = 2,
         num_min_qs: Optional[int] = None,
-        critic_dropout_rate: Optional[float] = None,
-        critic_weight_decay: Optional[float] = None,
         critic_layer_norm: bool = False,
         target_entropy: Optional[float] = None,
         init_temperature: float = 1.0,
         backup_entropy: bool = True,
-        use_pnorm: bool = False,
-        use_critic_resnet: bool = False,
     ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -83,9 +63,7 @@ class SACLearner(Agent):
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
 
-        actor_base_cls = partial(
-            MLP, hidden_dims=hidden_dims, activate_final=True, use_pnorm=use_pnorm
-        )
+        actor_base_cls = partial(MLP, hidden_dims=hidden_dims, activate_final=True)
         actor_def = TanhNormal(actor_base_cls, action_dim)
         actor_params = actor_def.init(actor_key, observations)["params"]
         actor = TrainState.create(
@@ -94,35 +72,19 @@ class SACLearner(Agent):
             tx=optax.adam(learning_rate=actor_lr),
         )
 
-        if use_critic_resnet:
-            critic_base_cls = partial(
-                MLPResNetV2,
-                num_blocks=1,
-            )
-        else:
-            critic_base_cls = partial(
-                MLP,
-                hidden_dims=hidden_dims,
-                activate_final=True,
-                dropout_rate=critic_dropout_rate,
-                use_layer_norm=critic_layer_norm,
-                use_pnorm=use_pnorm,
-            )
+        critic_base_cls = partial(
+            MLP,
+            hidden_dims=hidden_dims,
+            activate_final=True,
+            use_layer_norm=critic_layer_norm,
+        )
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
         critic_def = Ensemble(critic_cls, num=num_qs)
         critic_params = critic_def.init(critic_key, observations, actions)["params"]
-        if critic_weight_decay is not None:
-            tx = optax.adamw(
-                learning_rate=critic_lr,
-                weight_decay=critic_weight_decay,
-                mask=decay_mask_fn,
-            )
-        else:
-            tx = optax.adam(learning_rate=critic_lr)
         critic = TrainState.create(
             apply_fn=critic_def.apply,
             params=critic_params,
-            tx=tx,
+            tx=optax.adam(learning_rate=critic_lr),
         )
         target_critic_def = Ensemble(critic_cls, num=num_min_qs or num_qs)
         target_critic = TrainState.create(
@@ -155,18 +117,13 @@ class SACLearner(Agent):
 
     def update_actor(self, batch: DatasetDict) -> Tuple[Agent, Dict[str, float]]:
         key, rng = jax.random.split(self.rng)
-        key2, rng = jax.random.split(rng)
 
         def actor_loss_fn(actor_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
             dist = self.actor.apply_fn({"params": actor_params}, batch["observations"])
             actions, log_probs = dist.sample_and_log_prob(seed=key)
             qs = self.critic.apply_fn(
-                {"params": self.critic.params},
-                batch["observations"],
-                actions,
-                True,
-                rngs={"dropout": key2},
-            )  # training=True
+                {"params": self.critic.params}, batch["observations"], actions
+            )
             q = qs.mean(axis=0)
             actor_loss = (
                 log_probs * self.temp.apply_fn({"params": self.temp.params}) - q
@@ -209,14 +166,9 @@ class SACLearner(Agent):
             key, self.target_critic.params, self.num_min_qs, self.num_qs
         )
 
-        key, rng = jax.random.split(rng)
         next_qs = self.target_critic.apply_fn(
-            {"params": target_params},
-            batch["next_observations"],
-            next_actions,
-            True,
-            rngs={"dropout": key},
-        )  # training=True
+            {"params": target_params}, batch["next_observations"], next_actions
+        )
         next_q = next_qs.min(axis=0)
 
         target_q = batch["rewards"] + self.discount * batch["masks"] * next_q
@@ -229,16 +181,10 @@ class SACLearner(Agent):
                 * next_log_probs
             )
 
-        key, rng = jax.random.split(rng)
-
         def critic_loss_fn(critic_params) -> Tuple[jnp.ndarray, Dict[str, float]]:
             qs = self.critic.apply_fn(
-                {"params": critic_params},
-                batch["observations"],
-                batch["actions"],
-                True,
-                rngs={"dropout": key},
-            )  # training=True
+                {"params": critic_params}, batch["observations"], batch["actions"]
+            )
             critic_loss = ((qs - target_q) ** 2).mean()
             return critic_loss, {"critic_loss": critic_loss, "q": qs.mean()}
 

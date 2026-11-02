@@ -8,11 +8,9 @@ class StateActionValue(nn.Module):
     base_cls: nn.Module
 
     @nn.compact
-    def __call__(
-        self, observations: jnp.ndarray, actions: jnp.ndarray, *args, **kwargs
-    ) -> jnp.ndarray:
+    def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         inputs = jnp.concatenate([observations, actions], axis=-1)
-        outputs = self.base_cls()(inputs, *args, **kwargs)
+        outputs = self.base_cls()(inputs)
 
         value = nn.Dense(1, kernel_init=default_init())(outputs)
 

@@ -1,6 +1,5 @@
-import functools
 import math
-from typing import Optional, Tuple, Type, Union
+from typing import Tuple, Type
 
 import flax.linen as nn
 import jax
@@ -28,10 +27,6 @@ class MultivariateNormalDiag:
     def log_prob(self, x: jnp.ndarray) -> jnp.ndarray:
         z = (x - self.loc) / self.scale_diag
         return jnp.sum(-0.5 * z**2 - jnp.log(self.scale_diag) - _HALF_LOG_2PI, axis=-1)
-
-    def sample_and_log_prob(self, seed: jax.Array) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        x = self.sample(seed)
-        return x, self.log_prob(x)
 
     def mode(self) -> jnp.ndarray:
         return self.loc
@@ -66,38 +61,24 @@ class TanhMultivariateNormalDiag:
         return jnp.tanh(self.base.mode())
 
 
-class Normal(nn.Module):
+class TanhNormal(nn.Module):
+    """Policy head: a state-dependent diagonal Gaussian squashed by tanh."""
+
     base_cls: Type[nn.Module]
     action_dim: int
-    log_std_min: Optional[float] = -20
-    log_std_max: Optional[float] = 2
-    state_dependent_std: bool = True
-    squash_tanh: bool = False
+    log_std_min: float = -20
+    log_std_max: float = 2
 
     @nn.compact
-    def __call__(
-        self, inputs, *args, **kwargs
-    ) -> Union[MultivariateNormalDiag, TanhMultivariateNormalDiag]:
-        x = self.base_cls()(inputs, *args, **kwargs)
+    def __call__(self, inputs) -> TanhMultivariateNormalDiag:
+        x = self.base_cls()(inputs)
 
         means = nn.Dense(
             self.action_dim, kernel_init=default_init(), name="OutputDenseMean"
         )(x)
-        if self.state_dependent_std:
-            log_stds = nn.Dense(
-                self.action_dim, kernel_init=default_init(), name="OutputDenseLogStd"
-            )(x)
-        else:
-            log_stds = self.param(
-                "OutpuLogStd", nn.initializers.zeros, (self.action_dim,), jnp.float32
-            )
-
+        log_stds = nn.Dense(
+            self.action_dim, kernel_init=default_init(), name="OutputDenseLogStd"
+        )(x)
         log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
 
-        if self.squash_tanh:
-            return TanhMultivariateNormalDiag(means, jnp.exp(log_stds))
-        else:
-            return MultivariateNormalDiag(means, jnp.exp(log_stds))
-
-
-TanhNormal = functools.partial(Normal, squash_tanh=True)
+        return TanhMultivariateNormalDiag(means, jnp.exp(log_stds))
