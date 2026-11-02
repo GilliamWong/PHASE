@@ -1,8 +1,8 @@
 import collections
 from typing import Optional, Union
 
-import gym
-import gym.spaces
+import gymnasium as gym
+import gymnasium.spaces
 import jax
 import numpy as np
 

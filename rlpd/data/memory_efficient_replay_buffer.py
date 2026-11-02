@@ -1,10 +1,10 @@
 import copy
 from typing import Iterable, Optional, Tuple
 
-import gym
+import gymnasium as gym
 import numpy as np
 from flax.core import frozen_dict
-from gym.spaces import Box
+from gymnasium.spaces import Box
 
 from rlpd.data.dataset import DatasetDict, _sample
 from rlpd.data.replay_buffer import ReplayBuffer

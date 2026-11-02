@@ -4,8 +4,7 @@ import random
 from collections import deque
 from typing import Optional
 
-import dmcgym
-import gym
+import gymnasium as gym
 import numpy as np
 
 from rlpd.data import MemoryEfficientReplayBuffer
@@ -14,8 +13,8 @@ VD4RL_DIR = "~/.vd4rl"
 
 
 def get_dataset_dir(env, dataset_level, dataset_path):
-    env_name = env.unwrapped.spec.id
-    env_name = "_".join(env_name.split("-")[:-1])
+    # "dm_control/cheetah-run-v0" -> "cheetah_run"
+    env_name = env.unwrapped.spec.name.replace("-", "_")
     dataset_path = dataset_path if dataset_path else VD4RL_DIR
     dataset_dir = os.path.join(dataset_path, "main", f"{env_name}/{dataset_level}/64px")
     return pathlib.Path(os.path.expanduser(dataset_dir))
@@ -65,18 +64,6 @@ def convert(value):
     return value
 
 
-def wrap(env):
-    from rlpd.wrappers import wrap_pixels
-
-    return wrap_pixels(
-        env,
-        action_repeat=2,
-        image_size=64,
-        num_stack=3,
-        camera_id=0,
-    )
-
-
 class VD4RLDataset(MemoryEfficientReplayBuffer):
     def __init__(
         self,
@@ -120,8 +107,3 @@ class VD4RLDataset(MemoryEfficientReplayBuffer):
                         stacked_frames.append(episode["image"][i])
                         next_stacked_frames.append(episode["image"][i])
 
-
-if __name__ == "__main__":
-    env = gym.make("cheetah-run-v0")
-    env, pixel_keys = wrap(env)
-    dataset = VD4RLDataset(env, "expert", pixel_keys=pixel_keys)

@@ -1,6 +1,5 @@
 #! /usr/bin/env python
-import dmcgym
-import gym
+import gymnasium as gym
 import numpy as np
 import tqdm
 from absl import app, flags
@@ -12,12 +11,14 @@ from rlpd.agents import DrQLearner
 from rlpd.data import MemoryEfficientReplayBuffer, ReplayBuffer
 from rlpd.data.vd4rl_datasets import VD4RLDataset
 from rlpd.evaluation import evaluate
-from rlpd.wrappers import WANDBVideo, wrap_pixels
+from rlpd.wrappers import WANDBVideo, make_pixel_env, seed_env
 
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("project_name", "rlpd_pixels", "wandb project name.")
-flags.DEFINE_string("env_name", "cheetah-run-v0", "Environment name.")
+flags.DEFINE_string(
+    "env_name", "dm_control/cheetah-run-v0", "dm_control env id (via shimmy)."
+)
 flags.DEFINE_string(
     "dataset_level", "expert", "Dataset level (e.g., random, expert, etc.)."
 )
@@ -56,12 +57,12 @@ config_flags.DEFINE_config_file(
 )
 
 PLANET_ACTION_REPEAT = {
-    "cartpole-swingup-v0": 8,
-    "reacher-easy-v0": 4,
-    "cheetah-run-v0": 4,
-    "finger-spin-v0": 2,
-    "ball_in_cup-catch-v0": 4,
-    "walker-walk-v0": 2,
+    "dm_control/cartpole-swingup-v0": 8,
+    "dm_control/reacher-easy-v0": 4,
+    "dm_control/cheetah-run-v0": 4,
+    "dm_control/finger-spin-v0": 2,
+    "dm_control/ball_in_cup-catch-v0": 4,
+    "dm_control/walker-walk-v0": 2,
 }
 
 
@@ -91,25 +92,23 @@ def main(_):
 
     action_repeat = FLAGS.action_repeat or PLANET_ACTION_REPEAT.get(FLAGS.env_name, 2)
 
-    def wrap(env):
+    def make_env():
         if "quadruped" in FLAGS.env_name:
             camera_id = 2
         else:
             camera_id = 0
-        return wrap_pixels(
-            env,
+        return make_pixel_env(
+            FLAGS.env_name,
             action_repeat=action_repeat,
             image_size=FLAGS.image_size,
             num_stack=FLAGS.num_stack,
             camera_id=camera_id,
         )
 
-    env = gym.make(FLAGS.env_name)
-    env, pixel_keys = wrap(env)
-    env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
+    env, pixel_keys = make_env()
+    env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
     if FLAGS.save_video:
         env = WANDBVideo(env)
-    env.seed(FLAGS.seed)
 
     ds = VD4RLDataset(
         env,
@@ -125,9 +124,8 @@ def main(_):
         }
     )
 
-    eval_env = gym.make(FLAGS.env_name)
-    eval_env, _ = wrap(eval_env)
-    eval_env.seed(FLAGS.seed + 42)
+    eval_env, _ = make_env()
+    seed_env(eval_env, FLAGS.seed + 42)
 
     replay_buffer_size = FLAGS.replay_buffer_size or FLAGS.max_steps // action_repeat
     if FLAGS.memory_efficient_replay_buffer:
@@ -167,7 +165,7 @@ def main(_):
         **kwargs,
     )
 
-    observation, done = env.reset(), False
+    observation = seed_env(env, FLAGS.seed)
     for i in tqdm.tqdm(
         range(1, FLAGS.max_steps // action_repeat + 1),
         smoothing=0.1,
@@ -177,12 +175,10 @@ def main(_):
             action = env.action_space.sample()
         else:
             action, agent = agent.sample_actions(observation)
-        next_observation, reward, done, info = env.step(action)
-
-        if not done or "TimeLimit.truncated" in info:
-            mask = 1.0
-        else:
-            mask = 0.0
+        next_observation, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        # Only true terminations stop bootstrapping; time-limit truncations do not.
+        mask = 0.0 if terminated else 1.0
 
         replay_buffer.insert(
             dict(
@@ -197,7 +193,7 @@ def main(_):
         observation = next_observation
 
         if done:
-            observation, done = env.reset(), False
+            observation, _ = env.reset()
             for k, v in info["episode"].items():
                 decode = {"r": "return", "l": "length", "t": "time"}
                 wandb.log({f"training/{decode[k]}": v}, step=i * action_repeat)

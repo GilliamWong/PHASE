@@ -1,25 +1,27 @@
 from typing import Optional
 
-import gym
+import gymnasium as gym
 import numpy as np
 
 import wandb
 
 
 class WANDBVideo(gym.Wrapper):
+    """Logs one video per episode to wandb.
+
+    Uses the "pixels" observation when present; otherwise the env must have been
+    made with render_mode="rgb_array".
+    """
+
     def __init__(
         self,
         env: gym.Env,
         name: str = "video",
-        pixel_hw: int = 84,
-        render_kwargs={},
         max_videos: Optional[int] = None,
     ):
         super().__init__(env)
 
         self._name = name
-        self._pixel_hw = pixel_hw
-        self._render_kwargs = render_kwargs
         self._max_videos = max_videos
         self._video = []
 
@@ -32,27 +34,19 @@ class WANDBVideo(gym.Wrapper):
             else:
                 self._video.append(obs["pixels"])
         else:
-            self._video.append(
-                self.render(
-                    height=self._pixel_hw,
-                    width=self._pixel_hw,
-                    mode="rgb_array",
-                    **self._render_kwargs
-                )
-            )
+            self._video.append(self.render())
 
     def reset(self, **kwargs):
         self._video.clear()
-        obs = super().reset(**kwargs)
+        obs, info = super().reset(**kwargs)
         self._add_frame(obs)
-        return obs
+        return obs, info
 
     def step(self, action: np.ndarray):
-
-        obs, reward, done, info = super().step(action)
+        obs, reward, terminated, truncated, info = super().step(action)
         self._add_frame(obs)
 
-        if done and len(self._video) > 0:
+        if (terminated or truncated) and len(self._video) > 0:
             if self._max_videos is not None:
                 self._max_videos -= 1
             video = np.moveaxis(np.stack(self._video), -1, 1)
@@ -61,4 +55,4 @@ class WANDBVideo(gym.Wrapper):
             video = wandb.Video(video, fps=20, format="mp4")
             wandb.log({self._name: video}, commit=False)
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info

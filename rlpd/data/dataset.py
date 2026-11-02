@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.core import frozen_dict
-from gym.utils import seeding
+from gymnasium.utils import seeding
 
 from rlpd.types import DataType
 
@@ -119,7 +119,7 @@ class Dataset(object):
                 indx = jax.random.randint(
                     key, (batch_size,), minval=0, maxval=len(self)
                 )
-                return rng, jax.tree_map(
+                return rng, jax.tree_util.tree_map(
                     lambda d: jnp.take(d, indx, axis=0), jax_dataset_dict
                 )
 

@@ -2,11 +2,8 @@
 import os
 import pickle
 
-import d4rl
-import d4rl.gym_mujoco
-import d4rl.locomotion
-import dmcgym
-import gym
+import gymnasium as gym
+import minari
 import numpy as np
 import tqdm
 from absl import app, flags
@@ -20,19 +17,18 @@ from ml_collections import config_flags
 import wandb
 from rlpd.agents import SACLearner
 from rlpd.data import ReplayBuffer
-from rlpd.data.d4rl_datasets import D4RLDataset
-
-try:
-    from rlpd.data.binary_datasets import BinaryDataset
-except:
-    print("not importing binary dataset")
+from rlpd.data.minari_datasets import MinariDataset
 from rlpd.evaluation import evaluate
-from rlpd.wrappers import wrap_gym
+from rlpd.wrappers import seed_env, wrap_gym
 
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("project_name", "rlpd", "wandb project name.")
-flags.DEFINE_string("env_name", "halfcheetah-expert-v2", "D4rl dataset name.")
+flags.DEFINE_string(
+    "dataset_id",
+    "mujoco/halfcheetah/expert-v0",
+    "Minari dataset id; downloaded on first use. The env is the one it was recorded in.",
+)
 flags.DEFINE_float("offline_ratio", 0.5, "Offline ratio.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
@@ -51,9 +47,6 @@ flags.DEFINE_boolean(
     "checkpoint_buffer", False, "Save agent replay buffer on evaluation."
 )
 flags.DEFINE_integer("utd_ratio", 1, "Update to data ratio.")
-flags.DEFINE_boolean(
-    "binary_include_bc", True, "Whether to include BC data in the binary datasets."
-)
 
 config_flags.DEFINE_config_file(
     "config",
@@ -100,19 +93,18 @@ def main(_):
         buffer_dir = os.path.join(log_dir, "buffers")
         os.makedirs(buffer_dir, exist_ok=True)
 
-    env = gym.make(FLAGS.env_name)
-    env = wrap_gym(env, rescale_actions=True)
-    env = gym.wrappers.RecordEpisodeStatistics(env, deque_size=1)
-    env.seed(FLAGS.seed)
-    # not ideal, but works for now:
-    if "binary" in FLAGS.env_name:
-        ds = BinaryDataset(env, include_bc_data=FLAGS.binary_include_bc)
-    else:
-        ds = D4RLDataset(env)
+    minari_dataset = minari.load_dataset(FLAGS.dataset_id, download=True)
+    ds = MinariDataset(minari_dataset)
 
-    eval_env = gym.make(FLAGS.env_name)
+    env = minari_dataset.recover_environment()
+    env = wrap_gym(env, rescale_actions=True)
+    env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
+    observation = seed_env(env, FLAGS.seed)
+
+    render_mode = "rgb_array" if FLAGS.save_video else None
+    eval_env = minari_dataset.recover_environment(eval_env=True, render_mode=render_mode)
     eval_env = wrap_gym(eval_env, rescale_actions=True)
-    eval_env.seed(FLAGS.seed + 42)
+    seed_env(eval_env, FLAGS.seed + 42)
 
     kwargs = dict(FLAGS.config)
     model_cls = kwargs.pop("model_cls")
@@ -132,7 +124,7 @@ def main(_):
         batch = {}
         for k, v in offline_batch.items():
             batch[k] = v
-            if "antmaze" in FLAGS.env_name and k == "rewards":
+            if "antmaze" in FLAGS.dataset_id and k == "rewards":
                 batch[k] -= 1
 
         agent, update_info = agent.update(batch, FLAGS.utd_ratio)
@@ -146,7 +138,6 @@ def main(_):
             for k, v in eval_info.items():
                 wandb.log({f"offline-evaluation/{k}": v}, step=i)
 
-    observation, done = env.reset(), False
     for i in tqdm.tqdm(
         range(0, FLAGS.max_steps + 1), smoothing=0.1, disable=not FLAGS.tqdm
     ):
@@ -154,12 +145,10 @@ def main(_):
             action = env.action_space.sample()
         else:
             action, agent = agent.sample_actions(observation)
-        next_observation, reward, done, info = env.step(action)
-
-        if not done or "TimeLimit.truncated" in info:
-            mask = 1.0
-        else:
-            mask = 0.0
+        next_observation, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        # Only true terminations stop bootstrapping; time-limit truncations do not.
+        mask = 0.0 if terminated else 1.0
 
         replay_buffer.insert(
             dict(
@@ -174,7 +163,7 @@ def main(_):
         observation = next_observation
 
         if done:
-            observation, done = env.reset(), False
+            observation, _ = env.reset()
             for k, v in info["episode"].items():
                 decode = {"r": "return", "l": "length", "t": "time"}
                 wandb.log({f"training/{decode[k]}": v}, step=i + FLAGS.pretrain_steps)
@@ -189,7 +178,7 @@ def main(_):
 
             batch = combine(offline_batch, online_batch)
 
-            if "antmaze" in FLAGS.env_name:
+            if "antmaze" in FLAGS.dataset_id:
                 batch["rewards"] -= 1
 
             agent, update_info = agent.update(batch, FLAGS.utd_ratio)

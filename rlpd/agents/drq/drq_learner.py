@@ -4,7 +4,8 @@ from functools import partial
 from itertools import zip_longest
 from typing import Callable, Optional, Sequence, Tuple
 
-import gym
+import flax
+import gymnasium as gym
 import jax
 import optax
 from flax import struct
@@ -47,7 +48,7 @@ def _share_encoder(source, target):
             replacers[k] = v
 
     # Use critic conv layers in actor:
-    new_params = target.params.copy(add_or_replace=replacers)
+    new_params = flax.core.copy(target.params, add_or_replace=replacers)
     return target.replace(params=new_params)
 
 
@@ -132,22 +133,28 @@ class DrQLearner(SACLearner):
             use_layer_norm=critic_layer_norm,
         )
         critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
-        critic_cls = partial(Ensemble, net_cls=critic_cls, num=num_qs)
-        critic_def = PixelMultiplexer(
-            encoder_cls=encoder_cls,
-            network_cls=critic_cls,
-            latent_dim=latent_dim,
-            pixel_keys=pixel_keys,
-            depth_keys=depth_keys,
-        )
+
+        def make_critic_def(num_members: int) -> PixelMultiplexer:
+            return PixelMultiplexer(
+                encoder_cls=encoder_cls,
+                network_cls=partial(Ensemble, net_cls=critic_cls, num=num_members),
+                latent_dim=latent_dim,
+                pixel_keys=pixel_keys,
+                depth_keys=depth_keys,
+            )
+
+        critic_def = make_critic_def(num_qs)
         critic_params = critic_def.init(critic_key, observations, actions)["params"]
         critic = TrainState.create(
             apply_fn=critic_def.apply,
             params=critic_params,
             tx=optax.adam(learning_rate=critic_lr),
         )
+        # Targets are evaluated on num_min_qs subsampled members (REDQ), so the
+        # target ensemble must be built at that size, as in SACLearner.
+        target_critic_def = make_critic_def(num_min_qs or num_qs)
         target_critic = TrainState.create(
-            apply_fn=critic_def.apply,
+            apply_fn=target_critic_def.apply,
             params=critic_params,
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         )
