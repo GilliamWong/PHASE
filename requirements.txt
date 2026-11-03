@@ -1,12 +1,8 @@
-# Python 3.12. Tested on Windows 11 (CPU only: JAX has no native Windows GPU
-# build) and on WSL2 Ubuntu 24.04 with an RTX 5070 Ti (CUDA 12). See SETUP.md.
+# Python 3.12. Tested on Windows 11 and WSL2 Ubuntu 24.04 with an RTX 5070 Ti.
+# Install torch first from PyTorch's CUDA index (SETUP.md); pip's default
+# index only has the CPU build on Windows.
 numpy >= 2.0
-jax[cuda12] >= 0.12, < 0.13; sys_platform == "linux"
-jax >= 0.12, < 0.13; sys_platform != "linux"
-flax >= 0.12, < 0.13
-optax >= 0.2.8
-ml_collections >= 1.1.0
-absl-py >= 2.0
+torch >= 2.14
 tqdm >= 4.60.0
 wandb >= 0.31
 moviepy >= 2.0
@@ -14,7 +10,7 @@ imageio >= 2.30
 
 # Robomimic tasks and datasets
 gymnasium >= 1.4, < 2
-# 1.5.2 needs numpy < 2 (through mink 0.0.5), which JAX 0.12 cannot use.
+# 1.5.2 needs numpy < 2 (through mink 0.0.5); the env tests pass on 1.5.1.
 robosuite == 1.5.1
 # robosuite 1.5.1 breaks on MuJoCo >= 3.10 (MjData.qM and mj_fullM changed);
 # the Robomimic demos replay faithfully on 3.3.x.

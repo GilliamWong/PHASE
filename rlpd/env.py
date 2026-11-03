@@ -145,3 +145,11 @@ class RobomimicEnv(gym.Env):
 
     def close(self):
         self._env.close()
+
+
+def seed_env(env: gym.Env, seed: int) -> np.ndarray:
+    """Seeds the env's dynamics and its spaces' samplers; returns the first obs."""
+    env.action_space.seed(seed)
+    env.observation_space.seed(seed)
+    observation, _ = env.reset(seed=seed)
+    return observation

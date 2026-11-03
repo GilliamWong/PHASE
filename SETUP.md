@@ -1,79 +1,57 @@
 # Setup
 
 This code base started from [ikostrikov/rlpd](https://github.com/ikostrikov/rlpd)
-and was ported to current libraries so it runs on Windows and on recent NVIDIA
-GPUs (tested on an RTX 5070 Ti).
+(JAX) and is now a PyTorch port of it, trimmed to what this project uses. It
+runs on the GPU on native Windows and on Linux (tested on an RTX 5070 Ti).
 
-## Where to run it
+## Install
 
-| Where | Device | Use it for |
-| --- | --- | --- |
-| WSL2 (Ubuntu 24.04) | GPU | Training |
-| Native Windows | CPU only | Debugging, quick checks |
-
-JAX does not publish GPU builds for native Windows, so GPU training runs inside
-WSL2. The Windows NVIDIA driver is all WSL2 needs; do not install a Linux
-driver or the CUDA toolkit inside WSL, because the `jax[cuda12]` wheels bring
-their own CUDA libraries.
-
-Both setups use Python 3.12 and [uv](https://docs.astral.sh/uv/).
-
-### WSL2 (GPU)
-
-Keep the virtual environment on the Linux filesystem; one under `/mnt/c` is
-much slower.
-
-```bash
-cd "/mnt/c/Users/<you>/Desktop/599J Project"
-uv venv --python 3.12 ~/.venvs/phase
-uv pip install --python ~/.venvs/phase -r requirements.txt
-source ~/.venvs/phase/bin/activate
-python scripts/setup_robosuite.py
-python -c "import jax; print(jax.devices())"   # expect [CudaDevice(id=0)]
-```
-
-### Native Windows (CPU)
+Python 3.12 and [uv](https://docs.astral.sh/uv/). Torch comes from PyTorch's
+CUDA index; pick the CUDA version your driver supports (`nvidia-smi` shows it;
+RTX 50-series cards need cu128 or newer).
 
 ```powershell
 uv venv --python 3.12 .venv
+uv pip install --python .venv torch --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python .venv -r requirements.txt
 .venv\Scripts\activate
 python scripts/setup_robosuite.py
+python -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
+The same commands work on Linux or WSL2 (`source .venv/bin/activate`).
 `scripts/setup_robosuite.py` writes robosuite's settings file and, on Windows,
 works around two robosuite bugs (a DLL it expects in its own folder, and a
 Linux-only rendering backend it forces). Rerun it after reinstalling robosuite.
 
 ### Tests
 
-From the repository root:
-
 ```bash
 python -m pytest tests
 ```
 
+The env tests need the Lift and Can datasets in the Hugging Face cache (a
+training run downloads them) and skip otherwise; the CUDA graph test needs a GPU.
+
 ## Running experiments
 
-Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` so JAX does not reserve most of the
-GPU's memory up front. Add `WANDB_MODE=offline` (or `disabled`) to run without
-a wandb login.
+```bash
+python -m rlpd.train --dataset=lift/ph --project_name=phase_lift
+```
+
+The defaults are RLPD's settings: 10 critics with LayerNorm, 2 of them in each
+target's min, 20 critic updates per environment step, and batches that are half
+demonstrations, half online data. Every field of `TrainConfig`
+(`rlpd/train.py`) and `AgentConfig` (`rlpd/agent.py`) is a flag, e.g.
+`--utd_ratio=10`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
+`python -m rlpd.train --help` lists them. Set `WANDB_MODE=offline` (or
+`disabled`) to run without a wandb login.
 
 Tasks and demonstrations come from [Robomimic](https://robomimic.github.io/)
 (robosuite 1.5 versions of its low-dim datasets). `--dataset=<task>/<quality>`
 picks one, e.g. `lift/ph` (200 proficient-human demos) or `can/mh` (300
 multi-human demos). It downloads on first use to the Hugging Face cache, and
 the environment is built from the env config stored in the file.
-
-```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning.py \
-    --dataset=lift/ph \
-    --utd_ratio=20 \
-    --start_training 5000 \
-    --max_steps 300000 \
-    --config=configs/rlpd_config.py \
-    --project_name=phase_lift
-```
 
 The MDP, shared by the env and the demos:
 
@@ -84,22 +62,53 @@ The MDP, shared by the env and the demos:
 - Episodes are truncated after `--horizon` steps (default 400, as in Robomimic).
 
 `--offline_ratio` sets the fraction of each batch drawn from the demos
-(default 0.5, as in RLPD); `--offline_ratio=0` trains purely online and does
-not load the demos.
+(default 0.5); `--offline_ratio=0` trains purely online and does not load the
+demos.
 
-`--save_video=True` logs one evaluation episode per evaluation to wandb.
+## Code layout
+
+| File | Contents |
+| --- | --- |
+| `rlpd/agent.py` | `AgentConfig`; the tanh-Gaussian actor; the critic ensemble; `RLPDAgent.update` (critic, actor and temperature losses); `capture_cuda_graph` |
+| `rlpd/data.py` | `TransitionBuffer` (replay buffer on the GPU); Robomimic demo loading; `sample_mixed` (the 50/50 demo/online batches) |
+| `rlpd/env.py` | `RobomimicEnv`, a robosuite task as a Gymnasium env with the sparse success reward; dataset download |
+| `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
+
+### The CUDA graph, and what it means for new losses
+
+On a GPU, the whole update (sampling the batch, 20 critic steps, the actor and
+temperature steps) is recorded once as a CUDA graph and replayed every step.
+That removes Python and kernel-launch overhead, which dominate with networks
+this small: about 12 ms per update instead of about 50 ms run normally.
+
+A recording replays the same GPU work every time, so code inside
+`RLPDAgent.update` and `sample_mixed` must:
+
+- keep every tensor's shape fixed. Data that grows (for example a set of
+  states for reward shaping) goes in a preallocated, fixed-capacity tensor
+  with its fill level stored on the GPU, as `TransitionBuffer` does;
+- never read values back to the host (`.item()`, `.cpu()`, `if tensor:`,
+  data-dependent shapes such as boolean-mask indexing);
+- keep host-side numbers that change between steps (such as a decaying loss
+  weight) in GPU tensors updated in place, not Python floats, which are frozen
+  into the recording.
+
+Recording fails loudly on host reads. Debug new code with `--no-cuda_graph`,
+then turn the graph back on; `tests/test_agent.py` checks that replays match
+updates run normally.
 
 ## Changes from upstream RLPD
 
+- JAX/Flax → PyTorch. One update from the same weights, batch and random draws
+  matches the JAX version to float32 precision; the random streams differ, so
+  runs are not bit-identical.
 - `gym` 0.23 → `gymnasium` 1.x. Environments use the five-value `step` API;
   only true terminations (not time-limit truncations) zero the bootstrap mask.
-- D4RL → Robomimic. `train_finetuning.py` takes `--dataset` (a Robomimic
-  task/quality) instead of `--env_name`, builds the robosuite environment from
-  the dataset, and logs success rate. It no longer runs the D4RL tasks.
-- `tensorflow-probability` → a small tanh-Gaussian in
-  `rlpd/distributions/tanh_normal.py`; TFP's JAX backend no longer imports with
-  current JAX. The math is the same, but random draws differ from upstream's.
-- Removed what this project does not use: the pixel pipeline (DrQ,
-  `train_finetuning_pixels.py`, V-D4RL loading, frame stacking), RLPD's
-  ablation options (critic dropout, weight decay, ResNet critic, p-norm), and
-  unused dataset helpers. They are in the upstream repository if needed.
+- D4RL → Robomimic. Training takes `--dataset` (a Robomimic task/quality),
+  builds the robosuite environment from the dataset, and logs success rate.
+- Removed what this project does not use: the pixel pipeline (DrQ, V-D4RL),
+  RLPD's ablation options (critic dropout, weight decay, ResNet critic,
+  p-norm), and the separate SAC and RLPD configs. The defaults are RLPD; the
+  old SAC config is `--num_qs=2 --num_min_qs=2 --hidden_dims 256 256
+  --no-critic_layer_norm --backup_entropy --utd_ratio=1 --offline_ratio=0`.
+  The removed parts are in the upstream repository if needed.
