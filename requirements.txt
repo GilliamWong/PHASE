@@ -12,10 +12,15 @@ wandb >= 0.31
 moviepy >= 2.0
 imageio >= 2.30
 
-# Environments and offline datasets
-gymnasium[mujoco] >= 1.4, < 2
-gymnasium-robotics >= 1.4  # AntMaze and Adroit environments
-minari[arrow,hdf5,hf] >= 0.5.4  # D4RL datasets, re-hosted
+# Robomimic tasks and datasets
+gymnasium >= 1.4, < 2
+# 1.5.2 needs numpy < 2 (through mink 0.0.5), which JAX 0.12 cannot use.
+robosuite == 1.5.1
+# robosuite 1.5.1 breaks on MuJoCo >= 3.10 (MjData.qM and mj_fullM changed);
+# the Robomimic demos replay faithfully on 3.3.x.
+mujoco >= 3.3, < 3.4
+h5py >= 3.8
+huggingface_hub >= 0.20  # downloads the Robomimic datasets
 
 # Tests
 pytest >= 8

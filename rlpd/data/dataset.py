@@ -1,5 +1,6 @@
 from typing import Dict, Optional, Union
 
+import jax
 import numpy as np
 from flax.core import frozen_dict
 from gymnasium.utils import seeding
@@ -63,3 +64,19 @@ class Dataset(object):
         """Samples batch_size transitions uniformly, with replacement."""
         indx = self.np_random.integers(len(self), size=batch_size)
         return frozen_dict.freeze(_sample(self.dataset_dict, indx))
+
+
+def combine_batches(offline_batch, online_batch, num_minibatches: int):
+    """Joins the batches so each UTD minibatch gets the same offline/online mix.
+
+    SACLearner.update splits the batch into num_minibatches consecutive slices,
+    so the two batches are merged slice by slice.
+    """
+
+    def merge(offline, online):
+        offline = offline.reshape(num_minibatches, -1, *offline.shape[1:])
+        online = online.reshape(num_minibatches, -1, *online.shape[1:])
+        merged = np.concatenate([offline, online], axis=1)
+        return merged.reshape(-1, *merged.shape[2:])
+
+    return jax.tree_util.tree_map(merge, dict(offline_batch), dict(online_batch))

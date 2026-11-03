@@ -3,8 +3,6 @@ import os
 import pickle
 
 import gymnasium as gym
-import minari
-import numpy as np
 import tqdm
 from absl import app, flags
 
@@ -16,20 +14,33 @@ from ml_collections import config_flags
 
 import wandb
 from rlpd.agents import SACLearner
-from rlpd.data import ReplayBuffer
-from rlpd.data.minari_datasets import MinariDataset
+from rlpd.data import ReplayBuffer, combine_batches
+from rlpd.data.robomimic_datasets import RobomimicDataset
+from rlpd.envs.robomimic import (
+    DEFAULT_HORIZON,
+    RobomimicEnv,
+    download_dataset,
+    read_env_args,
+)
 from rlpd.evaluation import evaluate
-from rlpd.wrappers import seed_env, wrap_gym
+from rlpd.wrappers import seed_env
 
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("project_name", "rlpd", "wandb project name.")
 flags.DEFINE_string(
-    "dataset_id",
-    "mujoco/halfcheetah/expert-v0",
-    "Minari dataset id; downloaded on first use. The env is the one it was recorded in.",
+    "dataset",
+    "lift/ph",
+    "Robomimic task/quality, e.g. lift/ph or can/mh. Downloaded on first use; "
+    "the env is built from the dataset's recorded env config.",
 )
-flags.DEFINE_float("offline_ratio", 0.5, "Offline ratio.")
+flags.DEFINE_float(
+    "offline_ratio",
+    0.5,
+    "Fraction of each batch drawn from the demos; 0 trains purely online.",
+)
+flags.DEFINE_float("success_reward", 10.0, "Reward on the (terminal) success step.")
+flags.DEFINE_integer("horizon", DEFAULT_HORIZON, "Max steps per episode.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
 flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
@@ -56,25 +67,13 @@ config_flags.DEFINE_config_file(
 )
 
 
-def combine(one_dict, other_dict):
-    combined = {}
-
-    for k, v in one_dict.items():
-        if isinstance(v, dict):
-            combined[k] = combine(v, other_dict[k])
-        else:
-            tmp = np.empty(
-                (v.shape[0] + other_dict[k].shape[0], *v.shape[1:]), dtype=v.dtype
-            )
-            tmp[0::2] = v
-            tmp[1::2] = other_dict[k]
-            combined[k] = tmp
-
-    return combined
-
-
 def main(_):
-    assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
+    assert 0.0 <= FLAGS.offline_ratio < 1.0
+    use_demos = FLAGS.offline_ratio > 0 or FLAGS.pretrain_steps > 0
+    # Sizes are per UTD minibatch first, so both split evenly across the updates.
+    offline_per_minibatch = int(FLAGS.batch_size * FLAGS.offline_ratio)
+    num_offline = offline_per_minibatch * FLAGS.utd_ratio
+    num_online = (FLAGS.batch_size - offline_per_minibatch) * FLAGS.utd_ratio
 
     wandb.init(project=FLAGS.project_name)
     wandb.config.update(FLAGS)
@@ -93,17 +92,18 @@ def main(_):
         buffer_dir = os.path.join(log_dir, "buffers")
         os.makedirs(buffer_dir, exist_ok=True)
 
-    minari_dataset = minari.load_dataset(FLAGS.dataset_id, download=True)
-    ds = MinariDataset(minari_dataset)
+    dataset_path = download_dataset(FLAGS.dataset)
+    env_args = read_env_args(dataset_path)
+    ds = RobomimicDataset(dataset_path, FLAGS.success_reward) if use_demos else None
 
-    env = minari_dataset.recover_environment()
-    env = wrap_gym(env, rescale_actions=True)
+    env = RobomimicEnv(env_args, FLAGS.horizon, FLAGS.success_reward)
     env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
     observation = seed_env(env, FLAGS.seed)
 
     render_mode = "rgb_array" if FLAGS.save_video else None
-    eval_env = minari_dataset.recover_environment(eval_env=True, render_mode=render_mode)
-    eval_env = wrap_gym(eval_env, rescale_actions=True)
+    eval_env = RobomimicEnv(
+        env_args, FLAGS.horizon, FLAGS.success_reward, render_mode=render_mode
+    )
     seed_env(eval_env, FLAGS.seed + 42)
 
     kwargs = dict(FLAGS.config)
@@ -120,13 +120,7 @@ def main(_):
     for i in tqdm.tqdm(
         range(0, FLAGS.pretrain_steps), smoothing=0.1, disable=not FLAGS.tqdm
     ):
-        offline_batch = ds.sample(FLAGS.batch_size * FLAGS.utd_ratio)
-        batch = {}
-        for k, v in offline_batch.items():
-            batch[k] = v
-            if "antmaze" in FLAGS.dataset_id and k == "rewards":
-                batch[k] -= 1
-
+        batch = ds.sample(FLAGS.batch_size * FLAGS.utd_ratio)
         agent, update_info = agent.update(batch, FLAGS.utd_ratio)
 
         if i % FLAGS.log_interval == 0:
@@ -167,19 +161,15 @@ def main(_):
             for k, v in info["episode"].items():
                 decode = {"r": "return", "l": "length", "t": "time"}
                 wandb.log({f"training/{decode[k]}": v}, step=i + FLAGS.pretrain_steps)
+            wandb.log(
+                {"training/success": float(info["is_success"])},
+                step=i + FLAGS.pretrain_steps,
+            )
 
         if i >= FLAGS.start_training:
-            online_batch = replay_buffer.sample(
-                int(FLAGS.batch_size * FLAGS.utd_ratio * (1 - FLAGS.offline_ratio))
-            )
-            offline_batch = ds.sample(
-                int(FLAGS.batch_size * FLAGS.utd_ratio * FLAGS.offline_ratio)
-            )
-
-            batch = combine(offline_batch, online_batch)
-
-            if "antmaze" in FLAGS.dataset_id:
-                batch["rewards"] -= 1
+            batch = replay_buffer.sample(num_online)
+            if num_offline > 0:
+                batch = combine_batches(ds.sample(num_offline), batch, FLAGS.utd_ratio)
 
             agent, update_info = agent.update(batch, FLAGS.utd_ratio)
 

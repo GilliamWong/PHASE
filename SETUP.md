@@ -28,6 +28,7 @@ cd "/mnt/c/Users/<you>/Desktop/599J Project"
 uv venv --python 3.12 ~/.venvs/phase
 uv pip install --python ~/.venvs/phase -r requirements.txt
 source ~/.venvs/phase/bin/activate
+python scripts/setup_robosuite.py
 python -c "import jax; print(jax.devices())"   # expect [CudaDevice(id=0)]
 ```
 
@@ -37,7 +38,12 @@ python -c "import jax; print(jax.devices())"   # expect [CudaDevice(id=0)]
 uv venv --python 3.12 .venv
 uv pip install --python .venv -r requirements.txt
 .venv\Scripts\activate
+python scripts/setup_robosuite.py
 ```
+
+`scripts/setup_robosuite.py` writes robosuite's settings file and, on Windows,
+works around two robosuite bugs (a DLL it expects in its own folder, and a
+Linux-only rendering backend it forces). Rerun it after reinstalling robosuite.
 
 ### Tests
 
@@ -53,58 +59,46 @@ Set `XLA_PYTHON_CLIENT_PREALLOCATE=false` so JAX does not reserve most of the
 GPU's memory up front. Add `WANDB_MODE=offline` (or `disabled`) to run without
 a wandb login.
 
-Offline data comes from [Minari](https://minari.farama.org/), the maintained
-successor of D4RL. Datasets download to `~/.minari/datasets` on first use.
-
-### MuJoCo locomotion
-
-```bash
-XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning.py \
-    --dataset_id=mujoco/halfcheetah/expert-v0 \
-    --utd_ratio=20 \
-    --start_training 5000 \
-    --max_steps 250000 \
-    --config=configs/rlpd_config.py \
-    --project_name=rlpd_locomotion
-```
-
-### AntMaze
+Tasks and demonstrations come from [Robomimic](https://robomimic.github.io/)
+(robosuite 1.5 versions of its low-dim datasets). `--dataset=<task>/<quality>`
+picks one, e.g. `lift/ph` (200 proficient-human demos) or `can/mh` (300
+multi-human demos). It downloads on first use to the Hugging Face cache, and
+the environment is built from the env config stored in the file.
 
 ```bash
 XLA_PYTHON_CLIENT_PREALLOCATE=false python train_finetuning.py \
-    --dataset_id=D4RL/antmaze/umaze-v1 \
+    --dataset=lift/ph \
     --utd_ratio=20 \
     --start_training 5000 \
     --max_steps 300000 \
     --config=configs/rlpd_config.py \
-    --config.backup_entropy=False \
-    --config.hidden_dims="(256, 256, 256)" \
-    --config.num_min_qs=1 \
-    --project_name=rlpd_antmaze
+    --project_name=phase_lift
 ```
 
-### Evaluation videos
+The MDP, shared by the env and the demos:
 
-`--save_video=True` logs one evaluation episode per evaluation to wandb. In
-WSL, also set `MUJOCO_GL=egl` for headless rendering; on Windows the default
-works.
+- Observations: Robomimic's standard low-dim keys (`object`,
+  `robot0_eef_pos`, `robot0_eef_quat`, `robot0_gripper_qpos`), concatenated.
+- Reward: `--success_reward` (default 10) on the success step, 0 otherwise.
+  Success ends the episode, so demos are cut at their first success.
+- Episodes are truncated after `--horizon` steps (default 400, as in Robomimic).
+
+`--offline_ratio` sets the fraction of each batch drawn from the demos
+(default 0.5, as in RLPD); `--offline_ratio=0` trains purely online and does
+not load the demos.
+
+`--save_video=True` logs one evaluation episode per evaluation to wandb.
 
 ## Changes from upstream RLPD
 
 - `gym` 0.23 → `gymnasium` 1.x. Environments use the five-value `step` API;
   only true terminations (not time-limit truncations) zero the bootstrap mask.
-- D4RL → Minari. `train_finetuning.py` takes `--dataset_id` (a Minari id)
-  instead of `--env_name`, and builds the environment from the dataset.
-  Minari's `mujoco/*` datasets were re-collected with the current MuJoCo
-  environments, so scores are not directly comparable with the paper's D4RL
-  numbers.
+- D4RL → Robomimic. `train_finetuning.py` takes `--dataset` (a Robomimic
+  task/quality) instead of `--env_name`, builds the robosuite environment from
+  the dataset, and logs success rate. It no longer runs the D4RL tasks.
 - `tensorflow-probability` → a small tanh-Gaussian in
   `rlpd/distributions/tanh_normal.py`; TFP's JAX backend no longer imports with
   current JAX. The math is the same, but random draws differ from upstream's.
-- Removed the AWAC Adroit "binary" datasets (`--env_name=pen-binary-v0`, etc.).
-  They need `mj_envs`, which is built on `mujoco-py` and does not install on
-  current Python. Minari's `D4RL/pen/*`, `D4RL/door/*`, ... Adroit datasets
-  work with `train_finetuning.py`.
 - Removed what this project does not use: the pixel pipeline (DrQ,
   `train_finetuning_pixels.py`, V-D4RL loading, frame stacking), RLPD's
   ablation options (critic dropout, weight decay, ResNet critic, p-norm), and
