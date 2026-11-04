@@ -36,7 +36,8 @@ training run downloads them) and skip otherwise; the CUDA graph test needs a GPU
 ## Running experiments
 
 ```bash
-python -m rlpd.train --dataset=lift/ph --project_name=phase_lift
+python -m rlpd.train --dataset=lift/ph
+tensorboard --logdir runs
 ```
 
 The defaults are RLPD's settings: 10 critics with LayerNorm, 2 of them in each
@@ -44,8 +45,16 @@ target's min, 20 critic updates per environment step, and batches that are half
 demonstrations, half online data. Every field of `TrainConfig`
 (`rlpd/train.py`) and `AgentConfig` (`rlpd/agent.py`) is a flag, e.g.
 `--utd_ratio=10`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
-`python -m rlpd.train --help` lists them. Set `WANDB_MODE=offline` (or
-`disabled`) to run without a wandb login.
+`python -m rlpd.train --help` lists them.
+
+Each run gets its own folder, `runs/<task>_<quality>_s<seed>_<date>-<time>/`,
+holding the TensorBoard logs, `config.json` (every setting), evaluation videos
+(`videos/`, with `--save_video`) and checkpoints (`checkpoint.pt` and
+`buffer.pt`, with `--checkpoint_model` / `--checkpoint_buffer`, overwritten at
+each evaluation). TensorBoard shows `training/*` (losses, Q, entropy,
+temperature every `--log_interval` steps; return, length and success per
+episode) and `evaluation/*` (mean return, length and success over
+`--eval_episodes` deterministic episodes every `--eval_interval` steps).
 
 Tasks and demonstrations come from [Robomimic](https://robomimic.github.io/)
 (robosuite 1.5 versions of its low-dim datasets). `--dataset=<task>/<quality>`
@@ -106,6 +115,8 @@ updates run normally.
   only true terminations (not time-limit truncations) zero the bootstrap mask.
 - D4RL → Robomimic. Training takes `--dataset` (a Robomimic task/quality),
   builds the robosuite environment from the dataset, and logs success rate.
+- wandb → TensorBoard, with the same metric names; videos are mp4 files in
+  the run folder.
 - Removed what this project does not use: the pixel pipeline (DrQ, V-D4RL),
   RLPD's ablation options (critic dropout, weight decay, ResNet critic,
   p-norm), and the separate SAC and RLPD configs. The defaults are RLPD; the

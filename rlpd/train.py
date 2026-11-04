@@ -2,30 +2,29 @@
 
 Usage: python -m rlpd.train --dataset=lift/ph [--flag=value ...]
 Every field of TrainConfig and AgentConfig is a flag; --help lists them.
+Each run writes TensorBoard logs, videos and checkpoints to its own folder
+under --log_dir; view them with: tensorboard --logdir runs
 """
 
 import argparse
 import dataclasses
+import json
 import os
+import time
 import typing
 from dataclasses import dataclass
-from typing import Dict
+from typing import Mapping
 
 import gymnasium as gym
+import imageio
 import numpy as np
 import torch
 import tqdm
-import wandb
+from torch.utils.tensorboard import SummaryWriter
 
 from rlpd.agent import AgentConfig, RLPDAgent, capture_cuda_graph
 from rlpd.data import TransitionBuffer, load_demo_buffer, sample_mixed
-from rlpd.env import (
-    DEFAULT_HORIZON,
-    RobomimicEnv,
-    download_dataset,
-    read_env_args,
-    seed_env,
-)
+from rlpd.env import DEFAULT_HORIZON, RobomimicEnv, download_dataset, read_env_args, seed_env
 
 
 @dataclass
@@ -45,9 +44,8 @@ class TrainConfig:
     eval_interval: int = 5_000
     eval_episodes: int = 10
     log_interval: int = 1_000
-    project_name: str = "rlpd"  # wandb project
     log_dir: str = "runs"
-    save_video: bool = False  # log one evaluation episode per evaluation
+    save_video: bool = False  # save one evaluation episode per evaluation as an mp4
     checkpoint_model: bool = False  # save the agent at each evaluation
     checkpoint_buffer: bool = False  # save the online buffer at each evaluation
     cuda_graph: bool = True  # replay updates as a CUDA graph (GPU only)
@@ -74,45 +72,54 @@ def parse_config() -> typing.Tuple[TrainConfig, AgentConfig]:
 
     def build(cls):
         values = {f.name: args[f.name] for f in dataclasses.fields(cls)}
-        if cls is AgentConfig:
-            values["hidden_dims"] = tuple(values["hidden_dims"])
-        return cls(**values)
+        # nargs="+" gives lists; the configs hold tuples.
+        return cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in values.items()})
 
     return build(TrainConfig), build(AgentConfig)
 
 
+def log_scalars(writer: SummaryWriter, prefix: str, metrics: Mapping, step: int):
+    for name, value in metrics.items():
+        writer.add_scalar(f"{prefix}/{name}", float(value), step)
+
+
 def evaluate(
-    agent: RLPDAgent, env: gym.Env, num_episodes: int, save_video: bool = False
-) -> Dict[str, float]:
-    """Runs the deterministic policy; optionally logs the first episode's video."""
+    agent: RLPDAgent,
+    env: gym.Env,
+    num_episodes: int,
+    writer: SummaryWriter,
+    prefix: str,
+    step: int,
+    video_dir: typing.Optional[str] = None,
+):
+    """Runs the deterministic policy and logs its mean return, length and
+    success rate; with video_dir, also saves the first episode as an mp4."""
     returns, lengths, successes, frames = [], [], [], []
     for episode in range(num_episodes):
-        record = save_video and episode == 0
+        record = video_dir is not None and episode == 0
         observation, _ = env.reset()
         if record:
             frames.append(env.render())
-        episode_return, length, done = 0.0, 0, False
+        done = False
         while not done:
             action = agent.act(observation, deterministic=True)
-            observation, reward, terminated, truncated, info = env.step(action)
-            episode_return += reward
-            length += 1
+            observation, _, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             if record:
                 frames.append(env.render())
-        returns.append(episode_return)
-        lengths.append(length)
+        returns.append(info["episode"]["r"])
+        lengths.append(info["episode"]["l"])
         successes.append(info["is_success"])
 
-    if save_video:
-        # wandb expects (time, channel, height, width).
-        video = np.moveaxis(np.stack(frames), -1, 1)
-        wandb.log({"eval_video": wandb.Video(video, fps=20, format="mp4")}, commit=False)
-    return {
-        "return": float(np.mean(returns)),
-        "length": float(np.mean(lengths)),
-        "success": float(np.mean(successes)),
-    }
+    log_scalars(
+        writer,
+        prefix,
+        {"return": np.mean(returns), "length": np.mean(lengths), "success": np.mean(successes)},
+        step,
+    )
+    if frames:
+        os.makedirs(video_dir, exist_ok=True)
+        imageio.mimwrite(os.path.join(video_dir, f"{prefix}_{step:07d}.mp4"), frames, fps=20)
 
 
 def main():
@@ -122,24 +129,32 @@ def main():
     device = torch.device(config.device)
     use_cuda_graph = config.cuda_graph and device.type == "cuda"
 
-    wandb.init(
-        project=config.project_name,
-        config={**dataclasses.asdict(config), **dataclasses.asdict(agent_config)},
-    )
-    log_dir = os.path.join(config.log_dir, f"{config.dataset.replace('/', '_')}_s{config.seed}")
-    if config.checkpoint_model or config.checkpoint_buffer:
-        os.makedirs(log_dir, exist_ok=True)
+    run_name = f"{config.dataset.replace('/', '_')}_s{config.seed}_{time.strftime('%Y%m%d-%H%M%S')}"
+    run_dir = os.path.join(config.log_dir, run_name)
+    writer = SummaryWriter(run_dir)
+    full_config = {**dataclasses.asdict(config), **dataclasses.asdict(agent_config)}
+    with open(os.path.join(run_dir, "config.json"), "w") as f:
+        json.dump(full_config, f, indent=2)
+    # Indented so TensorBoard's text tab shows it as a code block.
+    writer.add_text("config", "    " + json.dumps(full_config, indent=2).replace("\n", "\n    "))
+    video_dir = os.path.join(run_dir, "videos") if config.save_video else None
 
     dataset_path = download_dataset(config.dataset)
     env_args = read_env_args(dataset_path)
-    env = RobomimicEnv(env_args, config.horizon, config.success_reward)
-    env = gym.wrappers.RecordEpisodeStatistics(env, buffer_length=1)
+    # RecordEpisodeStatistics adds each finished episode's return, length and
+    # duration to info["episode"].
+    env = gym.wrappers.RecordEpisodeStatistics(
+        RobomimicEnv(env_args, config.horizon, config.success_reward), buffer_length=1
+    )
     observation = seed_env(env, config.seed)
-    eval_env = RobomimicEnv(
-        env_args,
-        config.horizon,
-        config.success_reward,
-        render_mode="rgb_array" if config.save_video else None,
+    eval_env = gym.wrappers.RecordEpisodeStatistics(
+        RobomimicEnv(
+            env_args,
+            config.horizon,
+            config.success_reward,
+            render_mode="rgb_array" if config.save_video else None,
+        ),
+        buffer_length=1,
     )
     seed_env(eval_env, config.seed + 42)
 
@@ -163,21 +178,19 @@ def main():
 
     if config.pretrain_steps > 0:
         pretrain_update = make_update(config.batch_size, 0)
-    for i in tqdm.tqdm(range(config.pretrain_steps), smoothing=0.1, disable=not config.tqdm):
-        update_info = pretrain_update()
-        if i % config.log_interval == 0:
-            wandb.log({f"offline-training/{k}": v.item() for k, v in update_info.items()}, step=i)
-        if i % config.eval_interval == 0:
-            eval_info = evaluate(agent, eval_env, config.eval_episodes)
-            wandb.log({f"offline-evaluation/{k}": v for k, v in eval_info.items()}, step=i)
+        for i in tqdm.tqdm(range(config.pretrain_steps), smoothing=0.1, disable=not config.tqdm):
+            update_info = pretrain_update()
+            if i % config.log_interval == 0:
+                log_scalars(writer, "offline-training", update_info, i)
+            if i % config.eval_interval == 0:
+                evaluate(agent, eval_env, config.eval_episodes, writer, "offline-evaluation", i)
 
-    online_update = None  # built at the first update, once the buffer has data
+    # Built at the first update, once the buffer has data: recording a CUDA
+    # graph runs real updates.
+    online_update = None
     for i in tqdm.tqdm(range(config.max_steps + 1), smoothing=0.1, disable=not config.tqdm):
         step = i + config.pretrain_steps
-        if i < config.start_training:
-            action = env.action_space.sample()
-        else:
-            action = agent.act(observation)
+        action = env.action_space.sample() if i < config.start_training else agent.act(observation)
         next_observation, reward, terminated, truncated, info = env.step(action)
         # Only true terminations stop bootstrapping; time-limit truncations do not.
         online.add(observation, action, reward, 0.0 if terminated else 1.0, next_observation)
@@ -186,14 +199,16 @@ def main():
         if terminated or truncated:
             observation, _ = env.reset()
             episode = info["episode"]
-            wandb.log(
+            log_scalars(
+                writer,
+                "training",
                 {
-                    "training/return": episode["r"],
-                    "training/length": episode["l"],
-                    "training/time": episode["t"],
-                    "training/success": float(info["is_success"]),
+                    "return": episode["r"],
+                    "length": episode["l"],
+                    "time": episode["t"],
+                    "success": info["is_success"],
                 },
-                step=step,
+                step,
             )
 
         if i >= config.start_training:
@@ -201,17 +216,16 @@ def main():
                 online_update = make_update(demos_per_minibatch, online_per_minibatch)
             update_info = online_update()
             if i % config.log_interval == 0:
-                wandb.log({f"training/{k}": v.item() for k, v in update_info.items()}, step=step)
+                log_scalars(writer, "training", update_info, step)
 
         if i % config.eval_interval == 0:
-            eval_info = evaluate(agent, eval_env, config.eval_episodes, config.save_video)
-            wandb.log({f"evaluation/{k}": v for k, v in eval_info.items()}, step=step)
+            evaluate(agent, eval_env, config.eval_episodes, writer, "evaluation", step, video_dir)
             if config.checkpoint_model:
-                torch.save(
-                    {"step": i, **agent.checkpoint()}, os.path.join(log_dir, "checkpoint.pt")
-                )
+                torch.save({"step": i, **agent.checkpoint()}, os.path.join(run_dir, "checkpoint.pt"))
             if config.checkpoint_buffer:
-                torch.save(online.rows[: len(online)].cpu(), os.path.join(log_dir, "buffer.pt"))
+                torch.save(online.rows[: len(online)].cpu(), os.path.join(run_dir, "buffer.pt"))
+
+    writer.close()
 
 
 if __name__ == "__main__":

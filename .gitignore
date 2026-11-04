@@ -128,8 +128,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# wandb
-wandb
 MUJOCO_LOG.TXT
-# Training outputs (checkpoints, buffers)
+# Training outputs (TensorBoard logs, videos, checkpoints, buffers)
 runs/

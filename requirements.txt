@@ -4,9 +4,9 @@
 numpy >= 2.0
 torch >= 2.14
 tqdm >= 4.60.0
-wandb >= 0.31
-moviepy >= 2.0
-imageio >= 2.30
+tensorboard >= 2.15
+imageio >= 2.30  # evaluation videos (mp4)
+imageio-ffmpeg >= 0.4
 
 # Robomimic tasks and datasets
 gymnasium >= 1.4, < 2
