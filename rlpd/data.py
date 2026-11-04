@@ -97,15 +97,18 @@ def _demo_names(data_group: h5py.Group) -> list:
     return sorted(data_group.keys(), key=lambda name: int(name.split("_")[1]))
 
 
-def load_demo_transitions(dataset_path: str, success_reward: float) -> dict:
-    """Reads Robomimic demos as (s, a, r, s') transitions in RobomimicEnv's MDP.
+def load_demo_buffer(
+    dataset_path: str, success_reward: float, device: torch.device, eps: float = 1e-5
+) -> TransitionBuffer:
+    """Robomimic demos as a full TransitionBuffer of (s, a, r, s') transitions
+    in RobomimicEnv's MDP.
 
     RobomimicEnv ends an episode at the first success, so each demo is cut
     there: that step becomes terminal with reward success_reward, and the
     steps after it (the demo keeps recording while the task stays solved) are
     dropped. Demos that never succeed are kept whole, without a terminal step.
     """
-    columns = {k: [] for k in ("observations", "next_observations", "actions", "rewards", "masks")}
+    columns = {k: [] for k in ("observations", "actions", "rewards", "masks", "next_observations")}
     with h5py.File(dataset_path, "r") as f:
         data = f["data"]
         for name in _demo_names(data):
@@ -130,18 +133,11 @@ def load_demo_transitions(dataset_path: str, success_reward: float) -> dict:
             columns["rewards"].append(rewards)
             columns["masks"].append(masks)
 
-    return {k: np.concatenate(v) for k, v in columns.items()}
-
-
-def load_demo_buffer(
-    dataset_path: str, success_reward: float, device: torch.device, eps: float = 1e-5
-) -> TransitionBuffer:
-    """Robomimic demonstrations as a full TransitionBuffer of offline data."""
-    t = load_demo_transitions(dataset_path, success_reward)
-    # Keeps demo actions strictly inside the tanh policy's support.
-    actions = np.clip(t["actions"], -1 + eps, 1 - eps)
-    buffer = TransitionBuffer(
-        t["observations"].shape[1], actions.shape[1], len(actions), device
-    )
-    buffer.add_many(t["observations"], actions, t["rewards"], t["masks"], t["next_observations"])
+    t = {k: np.concatenate(v) for k, v in columns.items()}
+    # Keeps demo actions strictly inside the tanh policy's support; the
+    # gripper action is always exactly -1 or 1 in these demos.
+    t["actions"] = np.clip(t["actions"], -1 + eps, 1 - eps)
+    obs_dim, action_dim = t["observations"].shape[1], t["actions"].shape[1]
+    buffer = TransitionBuffer(obs_dim, action_dim, len(t["rewards"]), device)
+    buffer.add_many(**t)
     return buffer

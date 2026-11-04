@@ -23,6 +23,10 @@ DEFAULT_HORIZON = 400
 
 _HF_REPO = "robomimic/robomimic_datasets"
 
+# Evaluation videos: square frames from Robomimic's default viewpoint.
+_RENDER_SIZE = 256
+_RENDER_CAMERA = "agentview"
+
 
 def download_dataset(dataset: str) -> str:
     """Downloads a low-dim Robomimic dataset, e.g. "lift/ph", and returns its path.
@@ -72,12 +76,8 @@ class RobomimicEnv(gym.Env):
         horizon: int = DEFAULT_HORIZON,
         success_reward: float = 10.0,
         render_mode: Optional[str] = None,
-        render_size: int = 256,
-        render_camera: str = "agentview",
     ):
         self.render_mode = render_mode
-        self._render_size = render_size
-        self._render_camera = render_camera
         self._horizon = horizon
         self._success_reward = success_reward
 
@@ -112,9 +112,6 @@ class RobomimicEnv(gym.Env):
         """The MuJoCo simulation, e.g. for saving and restoring states."""
         return self._env.sim
 
-    def is_success(self) -> bool:
-        return bool(self._env._check_success())
-
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None:
@@ -127,7 +124,7 @@ class RobomimicEnv(gym.Env):
     def step(self, action):
         raw_obs, _, _, info = self._env.step(action)
         self._num_steps += 1
-        success = self.is_success()
+        success = bool(self._env._check_success())
         info = dict(info, is_success=success)
         reward = self._success_reward if success else 0.0
         truncated = self._num_steps >= self._horizon and not success
@@ -136,9 +133,9 @@ class RobomimicEnv(gym.Env):
 
     def render(self):
         frame = self._env.sim.render(
-            width=self._render_size,
-            height=self._render_size,
-            camera_name=self._render_camera,
+            width=_RENDER_SIZE,
+            height=_RENDER_SIZE,
+            camera_name=_RENDER_CAMERA,
         )
         # MuJoCo's offscreen buffer is upside down.
         return frame[::-1]

@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import torch
 
-from rlpd.data import TransitionBuffer, load_demo_transitions, sample_mixed
+from rlpd.data import TransitionBuffer, load_demo_buffer, sample_mixed
 from rlpd.env import OBS_KEYS, flatten_observation
 
 OBS_DIMS = {"object": 3, "robot0_eef_pos": 3, "robot0_eef_quat": 4, "robot0_gripper_qpos": 2}
@@ -17,13 +17,16 @@ def _write_demo(group, rewards, rng):
             group.create_dataset(f"{obs_group}/{key}", data=rng.normal(size=(num_steps, dim)))
         # A key outside OBS_KEYS, which must be ignored.
         group.create_dataset(f"{obs_group}/robot0_joint_vel", data=rng.normal(size=(num_steps, 7)))
-    group.create_dataset("actions", data=rng.uniform(-1, 1, (num_steps, 7)))
+    actions = rng.uniform(-1, 1, (num_steps, 7))
+    actions[:, -1] = rng.choice([-1.0, 1.0], num_steps)  # the gripper, as in Robomimic
+    group.create_dataset("actions", data=actions)
     group.create_dataset("rewards", data=np.asarray(rewards, dtype=np.float64))
 
 
 def test_demos_end_at_first_success(tmp_path):
     # Catches demos running past the success step, which RobomimicEnv never
-    # produces online, and success not being terminal.
+    # produces online, success not being terminal, and demo actions at exactly
+    # +-1, where the tanh policy's log-probability is infinite.
     path = tmp_path / "demos.hdf5"
     rng = np.random.default_rng(0)
     with h5py.File(path, "w") as f:
@@ -31,16 +34,19 @@ def test_demos_end_at_first_success(tmp_path):
         _write_demo(f.create_group("data/demo_2"), [0, 0, 0, 1, 1], rng)
         _write_demo(f.create_group("data/demo_10"), [0, 0, 0], rng)  # never succeeds
 
-    transitions = load_demo_transitions(str(path), success_reward=10.0)
+    buffer = load_demo_buffer(str(path), success_reward=10.0, device=torch.device("cpu"))
+    transitions = buffer.split(buffer.rows)
 
-    np.testing.assert_array_equal(transitions["rewards"], [0, 0, 0, 10, 0, 0, 0])
-    np.testing.assert_array_equal(transitions["masks"], [1, 1, 1, 0, 1, 1, 1])
+    np.testing.assert_array_equal(transitions.rewards, [0, 0, 0, 10, 0, 0, 0])
+    np.testing.assert_array_equal(transitions.masks, [1, 1, 1, 0, 1, 1, 1])
+    assert (transitions.actions.abs() < 1).all()
     with h5py.File(path) as f:
         demo = f["data/demo_2"]
         expected_obs = flatten_observation({k: demo["obs"][k][:4] for k in OBS_KEYS})
         expected_next = flatten_observation({k: demo["next_obs"][k][:4] for k in OBS_KEYS})
-    np.testing.assert_allclose(transitions["observations"][:4], expected_obs)
-    np.testing.assert_allclose(transitions["next_observations"][:4], expected_next)
+    # The buffer stores float32.
+    np.testing.assert_allclose(transitions.observations[:4], expected_obs, rtol=1e-6)
+    np.testing.assert_allclose(transitions.next_observations[:4], expected_next, rtol=1e-6)
 
 
 def _buffer_with(values, capacity, obs_dim=2, action_dim=1):

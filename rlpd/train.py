@@ -146,7 +146,8 @@ def main():
     obs_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     agent = RLPDAgent(obs_dim, action_dim, agent_config, device)
-    online = TransitionBuffer(obs_dim, action_dim, config.max_steps, device)
+    # The loop below runs max_steps + 1 steps, so every transition fits.
+    online = TransitionBuffer(obs_dim, action_dim, config.max_steps + 1, device)
 
     demos_per_minibatch = int(config.batch_size * config.offline_ratio)
     online_per_minibatch = config.batch_size - demos_per_minibatch
