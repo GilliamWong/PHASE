@@ -45,9 +45,13 @@ class TrainConfig:
     eval_episodes: int = 10
     log_interval: int = 1_000
     log_dir: str = "runs"
+    run_name: str = ""  # optional label at the start of the run folder's name, e.g. qoil_b0.25
     save_video: bool = False  # save one evaluation episode per evaluation as an mp4
-    checkpoint_model: bool = False  # save the agent at each evaluation
-    checkpoint_buffer: bool = False  # save the online buffer at each evaluation
+    # Save the agent at each evaluation, to checkpoints/step_<step>.pt.
+    checkpoint_model: bool = False
+    # Save the online transitions added since the previous save at each
+    # evaluation, to buffer/step_<step>.pt.
+    checkpoint_buffer: bool = False
     cuda_graph: bool = True  # replay updates as a CUDA graph (GPU only)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     tqdm: bool = True
@@ -129,8 +133,22 @@ def main():
     device = torch.device(config.device)
     use_cuda_graph = config.cuda_graph and device.type == "cuda"
 
-    run_name = f"{config.dataset.replace('/', '_')}_s{config.seed}_{time.strftime('%Y%m%d-%H%M%S')}"
-    run_dir = os.path.join(config.log_dir, run_name)
+    name_parts = [
+        config.run_name,
+        config.dataset.replace("/", "_"),
+        f"s{config.seed}",
+        time.strftime("%Y%m%d-%H%M%S"),
+    ]
+    run_dir = os.path.join(config.log_dir, "_".join(part for part in name_parts if part))
+    # Raises if the folder exists (the same settings started in the same
+    # second), so two runs never write into one folder.
+    os.makedirs(run_dir)
+    checkpoint_dir = os.path.join(run_dir, "checkpoints")
+    buffer_dir = os.path.join(run_dir, "buffer")
+    if config.checkpoint_model:
+        os.makedirs(checkpoint_dir)
+    if config.checkpoint_buffer:
+        os.makedirs(buffer_dir)
     writer = SummaryWriter(run_dir)
     full_config = {**dataclasses.asdict(config), **dataclasses.asdict(agent_config)}
     with open(os.path.join(run_dir, "config.json"), "w") as f:
@@ -188,6 +206,7 @@ def main():
     # Built at the first update, once the buffer has data: recording a CUDA
     # graph runs real updates.
     online_update = None
+    buffer_rows_saved = 0
     for i in tqdm.tqdm(range(config.max_steps + 1), smoothing=0.1, disable=not config.tqdm):
         step = i + config.pretrain_steps
         action = env.action_space.sample() if i < config.start_training else agent.act(observation)
@@ -220,10 +239,23 @@ def main():
 
         if i % config.eval_interval == 0:
             evaluate(agent, eval_env, config.eval_episodes, writer, "evaluation", step, video_dir)
+            # Files are named by the step on TensorBoard's x-axis, so each
+            # checkpoint lines up with the evaluation logged just above.
             if config.checkpoint_model:
-                torch.save({"step": i, **agent.checkpoint()}, os.path.join(run_dir, "checkpoint.pt"))
+                torch.save(
+                    {"step": step, **agent.checkpoint()},
+                    os.path.join(checkpoint_dir, f"step_{step:07d}.pt"),
+                )
             if config.checkpoint_buffer:
-                torch.save(online.rows[: len(online)].cpu(), os.path.join(run_dir, "buffer.pt"))
+                # Only the rows added since the previous save: full copies at
+                # every evaluation would grow quadratically on disk. The online
+                # buffer holds one row per step and never wraps, so
+                # concatenating the files in step order rebuilds it.
+                torch.save(
+                    online.rows[buffer_rows_saved : len(online)].cpu(),
+                    os.path.join(buffer_dir, f"step_{step:07d}.pt"),
+                )
+                buffer_rows_saved = len(online)
 
     writer.close()
 

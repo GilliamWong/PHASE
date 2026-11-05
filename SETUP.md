@@ -47,11 +47,20 @@ demonstrations, half online data. Every field of `TrainConfig`
 `--utd_ratio=10`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
 `python -m rlpd.train --help` lists them.
 
-Each run gets its own folder, `runs/<task>_<quality>_s<seed>_<date>-<time>/`,
-holding the TensorBoard logs, `config.json` (every setting), evaluation videos
-(`videos/`, with `--save_video`) and checkpoints (`checkpoint.pt` and
-`buffer.pt`, with `--checkpoint_model` / `--checkpoint_buffer`, overwritten at
-each evaluation). TensorBoard shows `training/*` (losses, Q, entropy,
+Each run gets its own new folder,
+`runs/[<run_name>_]<task>_<quality>_s<seed>_<date>-<time>/` (`--run_name` is an
+optional label, e.g. `--run_name=qoil_b0.25`), and nothing in it is
+overwritten. It holds:
+
+- the TensorBoard logs and `config.json` (every setting);
+- `videos/`, one evaluation episode per evaluation (with `--save_video`);
+- `checkpoints/step_<step>.pt`, the agent and optimizer state at every
+  evaluation (with `--checkpoint_model`);
+- `buffer/step_<step>.pt`, the online transitions added since the previous
+  evaluation (with `--checkpoint_buffer`). Concatenating the files in step
+  order rebuilds the buffer up to that step.
+
+`<step>` matches the x-axis in TensorBoard. TensorBoard shows `training/*` (losses, Q, entropy,
 temperature every `--log_interval` steps; return, length and success per
 episode) and `evaluation/*` (mean return, length and success over
 `--eval_episodes` deterministic episodes every `--eval_interval` steps).
