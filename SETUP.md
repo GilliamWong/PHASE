@@ -142,7 +142,11 @@ On a deterministic corrector, `log_prob` keeps rising as the policy's std
 shrinks, so its gradient grows during training and λ does not fix BC's
 strength: in our fixed-temperature Lift BC+RL run, BC's gradient was about
 20 times the critic's and the policy's entropy fell to about -10. `mse` is
-bounded and leaves the std to the entropy term.
+bounded and leaves the std to the entropy term. `--bc_log_prob_cap=c`
+keeps the log-likelihood form but counts each sample's `log π(a | s)` only
+up to `c`, so BC stops pulling once the human's action is likely enough;
+`c = 3.5` (minus the target entropy) stops it narrowing the policy past
+what the entropy term holds it to.
 The same λ means a different strength under each form (MSE BC can become
 nearly negligible once the mean is close), so compare forms at matched
 `actor_grad_norm_bc / actor_grad_norm_q`, or over a few λ, not at equal λ.
@@ -242,6 +246,7 @@ configuration.
 | `rlpd/human.py` | `HumanConfig` and `SyntheticHuman`: the gate and the corrector that take over during training |
 | `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
 | `scripts/evaluate_checkpoints.py` | Re-evaluates a run's saved checkpoints on many episodes (see [Evaluating checkpoints](#evaluating-checkpoints)) |
+| `scripts/imitation_analysis.py` | At the states where the human acted (from a run's saved buffer), how far each checkpoint's mean action is from the corrector's and from a converged expert's: closer to the corrector than to the expert means imitation. `python -m scripts.imitation_analysis runs/<glob> --expert <checkpoint>` |
 | `scripts/summarize_runs.py` | One row per run from its TensorBoard logs: success averaged over training (Q-OIL's Fig. 10 metric), steps to 80% success, intervention share, critic gap and actor gradient norms. Compare runs with the same `--max_steps` and `--eval_interval`. `python -m scripts.summarize_runs runs/pilot_*` |
 
 ### The CUDA graph, and what it means for new losses

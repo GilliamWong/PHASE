@@ -260,3 +260,22 @@ def test_cuda_graph_replay_matches_eager_updates(config):
     # The actor's updates are random, so only check that replays move it.
     assert not torch.allclose(after_warmup, initial_actor_weight)
     assert not torch.allclose(graphed.actor.mean.weight, after_warmup)
+
+
+def test_bc_log_prob_cap_stops_the_pull_on_well_fit_actions():
+    # Catches the cap clipping the wrong side (blocking BC on poorly fit
+    # actions) or not cutting the gradient once log pi exceeds it.
+    torch.manual_seed(0)
+    agent = RLPDAgent(5, 2, AgentConfig(hidden_dims=(32, 32), num_qs=4, bc_weight=1.0), torch.device("cpu"))
+    batch = _repeated_row_buffer(5, 2, 16, torch.device("cpu"), intervention=True)
+    batch = batch.split(batch.sample_rows((16,)))
+    with torch.no_grad():
+        log_prob = agent.actor.log_prob(batch.observations, batch.actions, 1e-5)[0].item()
+
+    def bc_grad(cap):
+        agent.config.bc_log_prob_cap = cap
+        terms, _ = agent._actor_loss_terms(torch.randn(16, 5), batch)
+        return torch.autograd.grad(terms["bc"], agent.actor.mean.weight)[0]
+
+    torch.testing.assert_close(bc_grad(log_prob + 1.0), bc_grad(None))  # below the cap: unchanged
+    assert (bc_grad(log_prob - 1.0) == 0).all()  # above the cap: no pull

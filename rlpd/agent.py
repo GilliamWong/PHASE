@@ -67,6 +67,12 @@ class AgentConfig:
     #   is bounded (at most 4 per action dimension) and leaves the std to
     #   the entropy term.
     bc_loss: str = "log_prob"
+    # For bc_loss="log_prob": the most each sample's log pi(a | s) can count.
+    # Above it BC stops pulling, so it cannot keep narrowing the policy once
+    # the human's action is likely enough. None: uncapped. A natural value is
+    # -target_entropy (action_dim / 2 = 3.5 here), the log-density the
+    # entropy term holds the policy's own samples to.
+    bc_log_prob_cap: Optional[float] = None
     # BC clamps intervention actions to within this of +-1, where the tanh
     # policy's log-density is infinite. For saturated actions it sets BC's
     # pre-tanh target (atanh(1 - eps), about 6.1 at 1e-5) and so the BC
@@ -398,11 +404,14 @@ class RLPDAgent(nn.Module):
                 errors = self.actor.mode(intervention_batch.observations) - intervention_batch.actions
                 per_sample = (errors**2).sum(-1)
             else:
-                per_sample = -self.actor.log_prob(
+                log_probs = self.actor.log_prob(
                     intervention_batch.observations,
                     intervention_batch.actions,
                     self.config.bc_action_eps,
                 )
+                if self.config.bc_log_prob_cap is not None:
+                    log_probs = log_probs.clamp(max=self.config.bc_log_prob_cap)
+                per_sample = -log_probs
             # Every stored intervention row has interventions = 1. Before the
             # first intervention, sampling the empty buffer returns all-zero
             # rows, which this weight drops.
