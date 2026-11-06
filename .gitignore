@@ -129,5 +129,16 @@ dmypy.json
 .pyre/
 
 MUJOCO_LOG.TXT
-# Training outputs (TensorBoard logs, videos, checkpoints, buffers)
-runs/
+# Training outputs. Git keeps each run's metrics (config, TensorBoard log,
+# training output, checkpoint evaluations, evaluation videos); checkpoints and
+# replay buffers are too large and live on Hugging Face (see SETUP.md).
+runs/*
+!runs/*/
+runs/_local_logs/
+runs/*/**
+!runs/*/config.json
+!runs/*/events.out.tfevents.*
+!runs/*/train.log
+!runs/*/*.csv
+!runs/*/videos/
+!runs/*/videos/*.mp4
