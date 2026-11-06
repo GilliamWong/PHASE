@@ -204,6 +204,31 @@ episodes from the same initial states (`--seed`, 1000), on the CPU in
 that file are skipped, so a rerun with more `--steps` only adds the new ones.
 Without `--steps` it evaluates every checkpoint.
 
+## Saved runs
+
+Git holds each run's metrics under `runs/<run>/`: `config.json`, the
+TensorBoard log, `train.log` (the run's console output, for runs trained by
+a job queue) and any checkpoint-evaluation CSVs or evaluation videos, so
+`tensorboard --logdir runs` and `python -m scripts.summarize_runs runs/<glob>`
+work on a fresh clone. Checkpoints and replay buffers (about 0.5 GB per run)
+are in the private Hugging Face dataset
+[gilliamwong/qoil-runs](https://huggingface.co/datasets/gilliamwong/qoil-runs),
+laid out the same way. After `hf auth login` with an account that can read
+it, download one run's files, or everything, into `runs/`:
+
+```bash
+hf download gilliamwong/qoil-runs --repo-type dataset --local-dir runs --include "<run>/*"
+hf download gilliamwong/qoil-runs --repo-type dataset --local-dir runs
+```
+
+Run folders are named `<run_name>_<task>_<quality>_s<seed>_<start time>`.
+The figure 10 sweep's runs start with `f10_<takeover rule>_<method>`, where
+the rule is `full` (half of takeovers last until the episode ends, otherwise
+10-40 steps) or `cap100` (every takeover lasts 10-100 steps); all use the
+progress gate with `--progress_threshold=-1.58`, `--intervention_rate=0`
+and a temperature fixed at 0.01. Each run's `config.json` has its full
+configuration.
+
 ## Code layout
 
 | File | Contents |
