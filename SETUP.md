@@ -103,16 +103,16 @@ groups of flags add interventions and learning from them.
 
 **A synthetic human** (`HumanConfig`, `rlpd/human.py`) takes over from the
 learner during training, following Q-OIL's simulated human. `--corrector`
-names the checkpoint of the agent that acts during takeovers (deterministic
-mean actions), for example a partly trained RLPD run's
+names the checkpoint of the agent that acts during takeovers (its mean
+action; `--no-corrector_deterministic` samples from its policy instead), for example a partly trained RLPD run's
 `checkpoints/step_<step>.pt`. The gate decides when to take over:
 
 - `--gate=random` (default): each step with probability `--intervention_rate`.
 - `--gate=progress` (Q-OIL's PAM): also with probability
   `--stall_intervention_prob` (0.599) when `V(s_t) - V(s_{t-k})` is below
   `--progress_threshold` (-0.158), with `k = --progress_window` (12) and `V`
-  from the critic in `--progress_reference`. The paper's values assume
-  rewards of 0 or 10.
+  from the critic in `--progress_reference`. On our reward-10 critics the
+  paper's threshold (for a 0-1 value scale) is -1.58.
 
 A takeover lasts until the episode ends with probability
 `--full_takeover_prob` (0.5), otherwise for a uniform number of steps in
@@ -121,6 +121,9 @@ transitions are flagged in the replay buffer; evaluation is always autonomous.
 The human is active from the first step, as in Q-OIL's Algorithm 1. Updates
 start after `--start_training` (200) random-action steps, the only "training
 starts" value the paper gives; this repo used 5,000 before.
+`--demos_as_interventions` counts the warm-start demos as interventions:
+they get the bonus and start the BC buffer (the paper does not say whether
+its D_int includes them).
 
 **Q-OIL** (`AgentConfig`) learns from the flagged transitions:
 

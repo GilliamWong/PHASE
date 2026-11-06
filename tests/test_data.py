@@ -39,7 +39,7 @@ def test_demos_end_at_first_success(tmp_path):
 
     np.testing.assert_array_equal(transitions.rewards, [0, 0, 0, 10, 0, 0, 0])
     np.testing.assert_array_equal(transitions.masks, [1, 1, 1, 0, 1, 1, 1])
-    # Demos must never get Q-OIL's intervention bonus.
+    # By default demos are not interventions, so they get no Q-OIL bonus.
     assert (transitions.interventions == 0).all()
     assert (transitions.actions.abs() < 1).all()
     with h5py.File(path) as f:
@@ -111,3 +111,19 @@ def test_each_minibatch_gets_the_same_demo_online_mix():
 
     assert batch.rewards.shape == (4, 8)
     assert (batch.rewards.sum(dim=1) == 5).all()
+
+
+def test_demos_as_interventions_are_flagged_and_leave_room(tmp_path):
+    # Catches --demos_as_interventions not flagging the demos (no bonus, and
+    # BC would drop them) or a D_int too small for the online interventions.
+    path = tmp_path / "demos.hdf5"
+    with h5py.File(path, "w") as f:
+        _write_demo(f.create_group("data/demo_1"), [0, 0, 1], np.random.default_rng(0))
+
+    buffer = load_demo_buffer(
+        str(path), 10.0, torch.device("cpu"), as_interventions=True, extra_capacity=5
+    )
+    assert len(buffer) == 3 and buffer.capacity == 8
+    assert (buffer.split(buffer.rows[:3]).interventions == 1).all()
+    buffer.add(np.zeros(12), np.zeros(7), 0.0, 1.0, np.zeros(12), intervention=True)
+    assert len(buffer) == 4

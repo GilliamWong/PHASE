@@ -39,6 +39,10 @@ class HumanConfig:
     full_takeover_prob: float = 0.5
     min_takeover_steps: int = 10
     max_takeover_steps: int = 40
+    # The corrector gives its mean action, as in evaluation, so its measured
+    # success rate describes the actions it gives; --no-corrector_deterministic
+    # samples from its policy instead (the paper does not say which it used).
+    corrector_deterministic: bool = True
 
 
 def critic_value(agent: RLPDAgent) -> Callable[[np.ndarray], float]:
@@ -95,9 +99,7 @@ class SyntheticHuman:
         if self._takeover_steps_left == 0:
             return None
         self._takeover_steps_left -= 1
-        # The mean action, as in evaluation, so the corrector's measured
-        # success rate describes the actions it gives.
-        return self._corrector.act(observation, deterministic=True)
+        return self._corrector.act(observation, deterministic=config.corrector_deterministic)
 
     def _takeover_prob(self) -> float:
         config = self._config

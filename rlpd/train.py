@@ -38,6 +38,10 @@ class TrainConfig:
     dataset: str = "lift/ph"
     offline_ratio: float = 0.5  # fraction of each batch from the demos; 0 is purely online
     num_demos: Optional[int] = None  # use the dataset's first num_demos demos; None uses all
+    # Count the demos as interventions: they get Q-OIL's bonus and start the
+    # BC buffer (D_int). The paper does not say whether its warm-start demos
+    # are part of D_int.
+    demos_as_interventions: bool = False
     success_reward: float = 10.0  # reward on the (terminal) success step
     horizon: int = DEFAULT_HORIZON  # max steps per episode
     seed: int = 42
@@ -216,17 +220,27 @@ def main():
             value = critic_value(reference)
         human = SyntheticHuman(human_config, corrector, np.random.default_rng(config.seed), value)
         human.reset()
-    # Q-OIL's D_int: the intervention transitions, sampled for the BC term.
-    interventions = None
-    if agent_config.bc_weight > 0:
-        interventions = TransitionBuffer(obs_dim, action_dim, config.max_steps + 1, device)
-
     demos_per_minibatch = int(config.batch_size * config.offline_ratio)
     online_per_minibatch = config.batch_size - demos_per_minibatch
     use_demos = demos_per_minibatch > 0 or config.pretrain_steps > 0
+    if config.demos_as_interventions and not use_demos:
+        raise ValueError("--demos_as_interventions needs demos in the batches (--offline_ratio > 0)")
     demos = None
     if use_demos:
-        demos = load_demo_buffer(dataset_path, config.success_reward, device, config.num_demos)
+        demos = load_demo_buffer(
+            dataset_path, config.success_reward, device, config.num_demos,
+            as_interventions=config.demos_as_interventions,
+        )
+    # Q-OIL's D_int: the intervention transitions, sampled for the BC term.
+    interventions = None
+    if agent_config.bc_weight > 0:
+        if config.demos_as_interventions:
+            interventions = load_demo_buffer(
+                dataset_path, config.success_reward, device, config.num_demos,
+                as_interventions=True, extra_capacity=config.max_steps + 1,
+            )
+        else:
+            interventions = TransitionBuffer(obs_dim, action_dim, config.max_steps + 1, device)
 
     def sample_batches(num_demos: int, num_online: int, num_minibatches: int):
         """Minibatches for the critic and, for the BC term, one batch of

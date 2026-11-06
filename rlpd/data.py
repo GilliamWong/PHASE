@@ -58,11 +58,13 @@ class TransitionBuffer:
         self._num_added += 1
         self._size.fill_(len(self))
 
-    def add_many(self, observations, actions, rewards, masks, next_observations):
+    def add_many(
+        self, observations, actions, rewards, masks, next_observations, interventions: bool = False
+    ):
         """Fills an empty buffer with arrays of transitions (one per row),
-        such as demonstrations; none of them are interventions."""
+        such as demonstrations, all flagged as interventions or none."""
         assert self._num_added == 0 and len(rewards) <= self.capacity
-        interventions = np.zeros_like(rewards)
+        interventions = np.full_like(rewards, float(interventions))
         rows = np.concatenate(
             [
                 observations,
@@ -125,10 +127,13 @@ def load_demo_buffer(
     device: torch.device,
     num_demos: Optional[int] = None,
     eps: float = 1e-5,
+    as_interventions: bool = False,
+    extra_capacity: int = 0,
 ) -> TransitionBuffer:
-    """Robomimic demos as a full TransitionBuffer of (s, a, r, s') transitions
-    in RobomimicEnv's MDP: the first num_demos in the file's numeric order, or
-    all of them when None.
+    """Robomimic demos as a TransitionBuffer of (s, a, r, s') transitions in
+    RobomimicEnv's MDP: the first num_demos in the file's numeric order, or
+    all of them when None. as_interventions flags them as interventions;
+    extra_capacity leaves room for that many more transitions.
 
     RobomimicEnv ends an episode at the first success, so each demo is cut
     there: that step becomes terminal with reward success_reward, and the
@@ -170,6 +175,6 @@ def load_demo_buffer(
     # gripper action is always exactly -1 or 1 in these demos.
     t["actions"] = np.clip(t["actions"], -1 + eps, 1 - eps)
     obs_dim, action_dim = t["observations"].shape[1], t["actions"].shape[1]
-    buffer = TransitionBuffer(obs_dim, action_dim, len(t["rewards"]), device)
-    buffer.add_many(**t)
+    buffer = TransitionBuffer(obs_dim, action_dim, len(t["rewards"]) + extra_capacity, device)
+    buffer.add_many(**t, interventions=as_interventions)
     return buffer

@@ -9,6 +9,7 @@ HUMAN_ACTION = np.array([0.5])
 
 class FixedCorrector:
     def act(self, observation, deterministic):
+        self.deterministic = deterministic
         return HUMAN_ACTION
 
 
@@ -53,3 +54,11 @@ def test_takeovers_last_the_sampled_length_or_until_reset():
     assert all(full.act(np.zeros(1)) is not None for _ in range(500))
     full.reset()
     assert full.act(np.zeros(1)) is None
+
+
+def test_corrector_acts_with_its_mean_unless_told_to_sample():
+    # Catches --no-corrector_deterministic being ignored, or the default changing.
+    for deterministic in (True, False):
+        human = _human(intervention_rate=1.0, corrector_deterministic=deterministic)
+        human.act(np.zeros(1))
+        assert human._corrector.deterministic is deterministic
