@@ -24,6 +24,8 @@ Notes on Q-OIL:
 	 - However in section 4 the log used for the suboptimality metric has the denominator go negative when n* < 229, which would make worse moves look better. Was the reference critic trained with the same reward or not
 6. If the numbers reported for alpha in the gating model are correct, then the simulated human is about 3.5x more likely to intervene than real humans. Alpha = Pr(intervene | stagnant), which table 1's precision estimates. Table 1 reports precision as 0.175, and recall as 0.606. However table 2 then defines alpha as 0.599, 3.5x higher. 
 	 - Section 4.2 says that k, delta, alpha, and beta were grid searched. But appendix F.1 says the grid search only covered k and delta. So how were the others found? 
+	 - alpha = 0.599 is almost exactly table 1's recall (0.606), which is the reverse conditional, Pr(stagnant | intervene). Possibly the two were swapped; worth asking.
+	 - beta, Pr(intervene | not stagnant), is defined in eq. 1 but never reported anywhere.
 7. Finding 3 says that human corrections follow different solution modes, so treating them as supervision can "induce undesirable multi modality". In table 2 the method then applies MLE BC with a gaussian head which is the definition of mode averaging. 
 8. The ablation is a strawman in my view, the variant that has no decoupling still has a fixed reward bonus term, so I would expect it to fail at high b. I think a better version would be a single critic with a bonus that decays with the intervention rate, as in R-max. 
 9. In figure 7, Q-OIL without BC shows a collapse in can performance and error bars from about 20-80%. This is not addressed, even though Q-OIL without BC is the main contribution of the paper, according to Pranav. 
@@ -33,9 +35,11 @@ Notes on Q-OIL:
 	 - In fact, Q-OIL without BC improves as the bonus is increased, which is exactly what I would expect if the bonus was acting as a BC substitute. When the BC regularization term is there, the bonus doesn't do much, when it's absent, it's actually working. 
 	 - Thinking about it, if the first term in the L_theta loss function is basically behavior cloning, then removing the bonus reward changes this to BC+RL, as the paper states. Adding it back is just, BC + BC. 
 		 - Therefore, you could test removing the bonus reward but upweighting lambda and seeing what happens. If it just is the extra BC push making the policy better then you would expect that upweighting lambda would do the same thing. 
+	 - Update (11/5, read off the rendered figure): the y-axis is success averaged over training, not final success. The b=0 points are well below the plateau: BC+RL (b=0) is about 0.38 and HIL about 0.29, while Q-OIL with BC is about 0.71 already at b=0.01 and flat after that; without BC it goes from about 0.47 to 0.64. So the bonus does add a lot on top of BC at the smallest b. That still fits the theory above if the bonus is a stronger, critic-mediated imitation signal that saturates at tiny b: any positive bonus flips the critic's preference toward the human action wherever Q_TD is nearly flat. The upweighted-lambda test is what separates "BC + BC" from "the bonus does something BC can't".
 11. Four participants per method is not enough for any statistical power. More than 4 is hard, yes, but in that case you would want paired comparisons. 
 	 - A lead in performance at every checkpoint does not mean that the algorithm is ahead necessarily, they're basically one repeated comparison. 
 12. Real robot results were run with a single person and ten eval episodes per checkpoint. The claimed gains are between 10-50% but binomial standard error over ten episodes is approx 0.16. For one of the tasks baselines were also run for more steps.
+	 - Section 6.1 says each checkpoint is evaluated for 10 episodes, but appendix G says Pen-in-Bowl is evaluated on 20 fixed pen positions.
 13. Error bars in figure 9 are across evals of ten episodes not across different training runs. 
 14. pi*, Q*, and V* are not described, we do not know their datasets, what participants trajectories were included, what participants were trained or tested on, whether interventions were included, how it was trained, etc. Since these are used for most of the findings in the start of the paper, these should be included. 
 	 - If demonstrations are used in the RLPD critics buffer from the same humans that intervened, then the demonstrations are in distribution where the interventions are not. Differences in timestep, action, etc, would all mean the critic labels interventions much more poorly. 
@@ -50,3 +54,21 @@ Notes on Q-OIL:
 19. Finding 3 is circular. Q*(s, a_final) is compared to Q*(s, a_human). A policy trained with off policy RL seems likely to score better under a critic trained the same way, compared to noisy humans. The explanation of divergent solution modes is not tested or quantified. 
 20. Ideally counterfactual could be, taking the robot at the state of intervention, rolling it out, and counting steps to success or total success rate. That would estimate n(s,a) monte carlo much better than using the critic on unfamiliar actions. 
 21. Appendix D.2 and section 6.2 don't line up on the number of participants and methods. The appendix leaves out Q-OIL without BC, which is included in figure 7.
+22. The sign of delta is inconsistent. Section 4.2 says "delta > 0", but table 2 sets delta = -0.158 (the grid in F.1 is [-0.5, 0.5]). With a negative delta, a plateau (zero progress) never triggers an intervention, only drops in value do, which contradicts "humans intervene when progress stagnates" and table 2's own label, "stagnation threshold".
+23. Progress is defined three different ways: a difference V*(s_t) - V*(s_{t-k}) in eq. 1, a ratio V*(s_t)/V*(s_{t-12}) on the axis of figure 2a, and (1/k) log V*(s_t)/V*(s_{t+k}) in appendix B. The ratio does not depend on the value scale; the difference does, so delta only means something once the scale is known.
+	 - Figure 2b plots V* between 0.30 and 1.05, which suggests the reference critic is on a 0-1 scale, but Pranav said rewards are 0 or 10. If PAM's V* is on a 0-1 scale, delta = -0.158 is a 16% drop in value; with a reward-10 critic the same rule needs -1.58.
+24. Corrector quality is described inconsistently. Section 4.2 says the simulated human is an RL checkpoint with ~50-70% success, appendix F.4 says ~70%. Appendix H says the bad corrector has "< 50% success rates across tasks", but figure 20's own annotations give ~42% (Lift), ~44% (Can) and ~58% (Square), so on Square the "bad" corrector overlaps the main corrector's range.
+25. The text describes figure 18 as covering the Robomimic tasks (Can, Square and Lift are listed) but it only shows Lift and Can.
+26. Table 2 sets learnable temperature to False but never gives the fixed value (table 3, for the VLA, gives an initial temperature of 0.01, which suggests a learned one there). The value matters: in our plain RLPD Lift run, a learned temperature started at 1.0 left Q near 0 and the policy near-random for ~20k steps, until the temperature had decayed to ~0.01.
+
+Questions for Pranav (11/5):
+- What scale is the PAM reference critic V* on, 0-1 or 0-10? delta = -0.158 depends on it.
+- What is beta, and where did alpha = 0.599 come from (table 1's precision is 0.175, recall 0.606)?
+- What intervention rate was the random gating model calibrated to?
+- What intervention-length distribution was sampled from (the "lower 75%" of the human distribution)?
+- What is the fixed temperature in the sim experiments?
+- Do the 10-20 warm-start demos also go into D_int, and do they get the bonus?
+- Does the simulated corrector act with its mean action or sampled actions?
+- Is the simulated human active from the start of training, including any random-action warm-up, and is there a random warm-up at all?
+- Which Can dataset (ph or mh), and how many demos in sim?
+- How does the BC term handle saturated actions (exactly +-1), where the tanh-Gaussian log-likelihood is infinite?
