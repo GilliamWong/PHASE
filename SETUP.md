@@ -246,6 +246,7 @@ configuration.
 | `rlpd/human.py` | `HumanConfig` and `SyntheticHuman`: the gate and the corrector that take over during training |
 | `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
 | `scripts/evaluate_checkpoints.py` | Re-evaluates a run's saved checkpoints on many episodes (see [Evaluating checkpoints](#evaluating-checkpoints)) |
+| `scripts/aggregate_runs.py` | One row per experiment (all seeds of a run name): success averaged over training, from the 100-episode checkpoint re-evaluation when present, with a 95% CI over seeds. `python -m scripts.aggregate_runs "runs/f10_*"` |
 | `scripts/imitation_analysis.py` | At the states where the human acted (from a run's saved buffer), how far each checkpoint's mean action is from the corrector's and from a converged expert's: closer to the corrector than to the expert means imitation. `python -m scripts.imitation_analysis runs/<glob> --expert <checkpoint>` |
 | `scripts/summarize_runs.py` | One row per run from its TensorBoard logs: success averaged over training (Q-OIL's Fig. 10 metric), steps to 80% success, intervention share, critic gap and actor gradient norms. Compare runs with the same `--max_steps` and `--eval_interval`. `python -m scripts.summarize_runs runs/pilot_*` |
 
