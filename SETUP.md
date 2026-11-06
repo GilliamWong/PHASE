@@ -40,12 +40,25 @@ python -m rlpd.train --dataset=lift/ph
 tensorboard --logdir runs
 ```
 
-The defaults are RLPD's settings: 10 critics with LayerNorm, 2 of them in each
-target's min, 20 critic updates per environment step, and batches that are half
-demonstrations, half online data. Every field of `TrainConfig`
-(`rlpd/train.py`) and `AgentConfig` (`rlpd/agent.py`) is a flag, e.g.
-`--utd_ratio=10`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
+The defaults are RLPD's settings, except the update-to-data ratio: 10 critics
+with LayerNorm, 2 of them in each target's min, batches that are half
+demonstrations, half online data, and 10 critic updates per environment step
+(Q-OIL's setting for every method; RLPD's is `--utd_ratio=20`, about twice as
+slow). Every field of `TrainConfig` (`rlpd/train.py`), `AgentConfig`
+(`rlpd/agent.py`) and `HumanConfig` (`rlpd/human.py`) is a flag, e.g.
+`--utd_ratio=20`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
 `python -m rlpd.train --help` lists them.
+
+Speed: on an RTX 5070 Ti, a Lift step takes about 4.5 ms in robosuite (CPU)
+and 6.6 ms for the update at UTD 10 (12.7 ms at 20). The loop launches each
+update before stepping the env, so the two overlap; each update therefore
+trains on transitions up to the previous step. Matrix multiplies use TF32 by
+default, which makes updates about 25% faster at reduced precision and
+changes a run's exact numbers, not the algorithm; `--no-tf32` gives full
+float32. Evaluations of
+failing episodes are slow (up to `--eval_episodes` × 400 env steps), so keep
+`--eval_interval` coarse and save checkpoints more often with
+`--checkpoint_interval` if needed.
 
 Each run gets its own new folder,
 `runs/[<run_name>_]<task>_<quality>_s<seed>_<date>-<time>/` (`--run_name` is an
@@ -54,11 +67,11 @@ overwritten. It holds:
 
 - the TensorBoard logs and `config.json` (every setting);
 - `videos/`, one evaluation episode per evaluation (with `--save_video`);
-- `checkpoints/step_<step>.pt`, the agent and optimizer state at every
-  evaluation (with `--checkpoint_model`);
+- `checkpoints/step_<step>.pt`, the agent and optimizer state every
+  `--checkpoint_interval` steps (with `--checkpoint_model`);
 - `buffer/step_<step>.pt`, the online transitions added since the previous
-  evaluation (with `--checkpoint_buffer`). Concatenating the files in step
-  order rebuilds the buffer up to that step.
+  save (with `--checkpoint_buffer`). Concatenating the files in step order
+  rebuilds the buffer up to that step.
 
 `<step>` matches the x-axis in TensorBoard. TensorBoard shows `training/*` (losses, Q, entropy,
 temperature every `--log_interval` steps; return, length and success per
@@ -155,6 +168,23 @@ Extra TensorBoard metrics:
   each term pushes the policy; unlike loss values, they ignore constants such
   as BC's `log(2 eps)`.
 
+## Evaluating checkpoints
+
+Training's evaluations use few episodes (10 gives a standard error of up to
+0.16 on a success rate). To pick checkpoints, for example correctors of a
+given success rate, re-evaluate them:
+
+```bash
+python -m scripts.evaluate_checkpoints runs/<run> --steps 40000 42000 44000
+```
+
+Each checkpoint runs its deterministic policy for `--episodes` (100)
+episodes from the same initial states (`--seed`, 1000), on the CPU in
+`--workers` (4) processes. Results, with standard errors, go to
+`runs/<run>/checkpoint_eval_<episodes>ep_seed<seed>.csv`; steps already in
+that file are skipped, so a rerun with more `--steps` only adds the new ones.
+Without `--steps` it evaluates every checkpoint.
+
 ## Code layout
 
 | File | Contents |
@@ -164,13 +194,15 @@ Extra TensorBoard metrics:
 | `rlpd/env.py` | `RobomimicEnv`, a robosuite task as a Gymnasium env with the sparse success reward; dataset download |
 | `rlpd/human.py` | `HumanConfig` and `SyntheticHuman`: the gate and the corrector that take over during training |
 | `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
+| `scripts/evaluate_checkpoints.py` | Re-evaluates a run's saved checkpoints on many episodes (see [Evaluating checkpoints](#evaluating-checkpoints)) |
 
 ### The CUDA graph, and what it means for new losses
 
-On a GPU, the whole update (sampling the batch, 20 critic steps, the actor and
-temperature steps) is recorded once as a CUDA graph and replayed every step.
-That removes Python and kernel-launch overhead, which dominate with networks
-this small: about 12 ms per update instead of about 50 ms run normally.
+On a GPU, the whole update (sampling the batch, the `--utd_ratio` critic
+steps, the actor and temperature steps) is recorded once as a CUDA graph and
+replayed every step. That removes Python and kernel-launch overhead, which
+dominate with networks this small: at 20 critic steps, about 12 ms per update
+instead of about 50 ms run normally.
 
 A recording replays the same GPU work every time, so code inside
 `RLPDAgent.update` and `sample_mixed` must:
@@ -191,8 +223,8 @@ updates run normally.
 ## Changes from upstream RLPD
 
 - JAX/Flax → PyTorch. One update from the same weights, batch and random draws
-  matches the JAX version to float32 precision; the random streams differ, so
-  runs are not bit-identical.
+  matches the JAX version to float32 precision (with `--no-tf32`); the random
+  streams differ, so runs are not bit-identical.
 - `gym` 0.23 → `gymnasium` 1.x. Environments use the five-value `step` API;
   only true terminations (not time-limit truncations) zero the bootstrap mask.
 - D4RL → Robomimic. Training takes `--dataset` (a Robomimic task/quality),

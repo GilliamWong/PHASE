@@ -9,6 +9,7 @@ under --log_dir; view them with: tensorboard --logdir runs
 """
 
 import argparse
+import collections
 import dataclasses
 import json
 import os
@@ -41,7 +42,9 @@ class TrainConfig:
     horizon: int = DEFAULT_HORIZON  # max steps per episode
     seed: int = 42
     batch_size: int = 256  # per critic update
-    utd_ratio: int = 20  # critic updates per environment step
+    # Critic updates per environment step: Q-OIL's setting for every method
+    # (RLPD's own default is 20, about twice as slow).
+    utd_ratio: int = 10
     max_steps: int = 300_000  # environment steps
     start_training: int = 5_000  # random-action steps before updates begin
     pretrain_steps: int = 0  # demo-only updates before online training
@@ -51,12 +54,20 @@ class TrainConfig:
     log_dir: str = "runs"
     run_name: str = ""  # optional label at the start of the run folder's name, e.g. qoil_b0.25
     save_video: bool = False  # save one evaluation episode per evaluation as an mp4
-    # Save the agent at each evaluation, to checkpoints/step_<step>.pt.
+    # Save the agent every checkpoint_interval steps, to checkpoints/step_<step>.pt.
     checkpoint_model: bool = False
-    # Save the online transitions added since the previous save at each
-    # evaluation, to buffer/step_<step>.pt.
+    # Save the online transitions added since the previous save every
+    # checkpoint_interval steps, to buffer/step_<step>.pt.
     checkpoint_buffer: bool = False
+    # Independent of eval_interval: saving is cheap, while an evaluation of
+    # failing episodes takes about as long as 1,500 training steps.
+    checkpoint_interval: int = 5_000
     cuda_graph: bool = True  # replay updates as a CUDA graph (GPU only)
+    # TF32 matrix multiplies on the GPU: updates about 25% faster, with
+    # matmul inputs rounded to 10 mantissa bits instead of float32's 23. This
+    # changes a run's exact numbers, not the algorithm; --no-tf32 for full
+    # float32 (e.g. to compare against the JAX version).
+    tf32: bool = True
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     tqdm: bool = True
 
@@ -91,20 +102,29 @@ def log_scalars(writer: SummaryWriter, prefix: str, metrics: Mapping, step: int)
         writer.add_scalar(f"{prefix}/{name}", float(value), step)
 
 
+def make_env(
+    env_args: dict, config: TrainConfig, render_mode: typing.Optional[str] = None
+) -> gym.Env:
+    """The task env used for training and evaluation."""
+    # RecordEpisodeStatistics adds each finished episode's return, length and
+    # duration to info["episode"].
+    return gym.wrappers.RecordEpisodeStatistics(
+        RobomimicEnv(env_args, config.horizon, config.success_reward, render_mode=render_mode),
+        buffer_length=1,
+    )
+
+
 def evaluate(
     agent: RLPDAgent,
     env: gym.Env,
     num_episodes: int,
-    writer: SummaryWriter,
-    prefix: str,
-    step: int,
-    video_dir: typing.Optional[str] = None,
-):
-    """Runs the deterministic policy and logs its mean return, length and
-    success rate; with video_dir, also saves the first episode as an mp4."""
+    video_path: typing.Optional[str] = None,
+) -> dict:
+    """Runs the deterministic policy and returns its mean return, length and
+    success rate; with video_path, also saves the first episode as an mp4."""
     returns, lengths, successes, frames = [], [], [], []
     for episode in range(num_episodes):
-        record = video_dir is not None and episode == 0
+        record = video_path is not None and episode == 0
         observation, _ = env.reset()
         if record:
             frames.append(env.render())
@@ -119,15 +139,10 @@ def evaluate(
         lengths.append(info["episode"]["l"])
         successes.append(info["is_success"])
 
-    log_scalars(
-        writer,
-        prefix,
-        {"return": np.mean(returns), "length": np.mean(lengths), "success": np.mean(successes)},
-        step,
-    )
     if frames:
-        os.makedirs(video_dir, exist_ok=True)
-        imageio.mimwrite(os.path.join(video_dir, f"{prefix}_{step:07d}.mp4"), frames, fps=20)
+        os.makedirs(os.path.dirname(video_path), exist_ok=True)
+        imageio.mimwrite(video_path, frames, fps=20)
+    return {"return": np.mean(returns), "length": np.mean(lengths), "success": np.mean(successes)}
 
 
 def main():
@@ -140,6 +155,7 @@ def main():
         # Without interventions these would silently train plain RLPD.
         raise ValueError("--bonus, --bc_weight and --optimistic_critic need --corrector")
     torch.manual_seed(config.seed)
+    torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
     device = torch.device(config.device)
     use_cuda_graph = config.cuda_graph and device.type == "cuda"
 
@@ -173,21 +189,9 @@ def main():
 
     dataset_path = download_dataset(config.dataset)
     env_args = read_env_args(dataset_path)
-    # RecordEpisodeStatistics adds each finished episode's return, length and
-    # duration to info["episode"].
-    env = gym.wrappers.RecordEpisodeStatistics(
-        RobomimicEnv(env_args, config.horizon, config.success_reward), buffer_length=1
-    )
+    env = make_env(env_args, config)
     observation = seed_env(env, config.seed)
-    eval_env = gym.wrappers.RecordEpisodeStatistics(
-        RobomimicEnv(
-            env_args,
-            config.horizon,
-            config.success_reward,
-            render_mode="rgb_array" if config.save_video else None,
-        ),
-        buffer_length=1,
-    )
+    eval_env = make_env(env_args, config, render_mode="rgb_array" if config.save_video else None)
     seed_env(eval_env, config.seed + 42)
 
     obs_dim = env.observation_space.shape[0]
@@ -246,7 +250,8 @@ def main():
             if i % config.log_interval == 0:
                 log_scalars(writer, "offline-training", update_info, i)
             if i % config.eval_interval == 0:
-                evaluate(agent, eval_env, config.eval_episodes, writer, "offline-evaluation", i)
+                eval_metrics = evaluate(agent, eval_env, config.eval_episodes)
+                log_scalars(writer, "offline-evaluation", eval_metrics, i)
 
     # Built at the first update, once the buffer has data: recording a CUDA
     # graph runs real updates.
@@ -257,7 +262,12 @@ def main():
     # bc_action_eps of +-1, where BC clamps them (see Actor.log_prob).
     clamped_intervention_actions = np.zeros(action_dim)
     clamp_limit = np.float32(1.0 - agent_config.bc_action_eps)
-    for i in tqdm.tqdm(range(config.max_steps + 1), smoothing=0.1, disable=not config.tqdm):
+    # Shown at the end of the progress bar: the latest evaluation's success
+    # rate and the success rate of the last 20 training episodes.
+    progress_stats = {}
+    recent_successes = collections.deque(maxlen=20)
+    progress = tqdm.tqdm(range(config.max_steps + 1), smoothing=0.1, disable=not config.tqdm)
+    for i in progress:
         step = i + config.pretrain_steps
         human_action = human.act(observation) if human is not None else None
         intervened = human_action is not None
@@ -267,6 +277,16 @@ def main():
             action = env.action_space.sample()
         else:
             action = agent.act(observation)
+
+        # Launched before env.step, which runs on the CPU while the GPU
+        # updates (the update is asynchronous; the next agent.act waits for
+        # it). It therefore trains on transitions up to the previous step.
+        # Running them in turn instead made each step about 27% slower.
+        if i >= config.start_training:
+            if online_update is None:
+                online_update = make_update(demos_per_minibatch, online_per_minibatch)
+            update_info = online_update()
+
         next_observation, reward, terminated, truncated, info = env.step(action)
         # Only true terminations stop bootstrapping; time-limit truncations do not.
         transition = (observation, action, reward, 0.0 if terminated else 1.0, next_observation)
@@ -302,19 +322,25 @@ def main():
                         episode_metrics[f"intervention_clamped_fraction_dim{dim}"] = fraction
             episode_intervention_steps = 0
             log_scalars(writer, "training", episode_metrics, step)
+            recent_successes.append(info["is_success"])
+            progress_stats["train_success"] = f"{np.mean(recent_successes):.2f}"
+            progress.set_postfix(progress_stats, refresh=False)
 
-        if i >= config.start_training:
-            if online_update is None:
-                online_update = make_update(demos_per_minibatch, online_per_minibatch)
-            update_info = online_update()
-            if i % config.log_interval == 0:
-                log_scalars(writer, "training", update_info, step)
-                log_scalars(writer, "training", actor_gradient_norms(), step)
+        # Logged after env.step: reading the update's values waits for it.
+        if i >= config.start_training and i % config.log_interval == 0:
+            log_scalars(writer, "training", update_info, step)
+            log_scalars(writer, "training", actor_gradient_norms(), step)
 
         if i % config.eval_interval == 0:
-            evaluate(agent, eval_env, config.eval_episodes, writer, "evaluation", step, video_dir)
-            # Files are named by the step on TensorBoard's x-axis, so each
-            # checkpoint lines up with the evaluation logged just above.
+            video_path = None
+            if video_dir is not None:
+                video_path = os.path.join(video_dir, f"evaluation_{step:07d}.mp4")
+            eval_metrics = evaluate(agent, eval_env, config.eval_episodes, video_path)
+            log_scalars(writer, "evaluation", eval_metrics, step)
+            progress_stats["eval_success"] = f"{eval_metrics['success']:.2f}"
+            progress.set_postfix(progress_stats, refresh=False)
+        # Files are named by the step on TensorBoard's x-axis.
+        if i % config.checkpoint_interval == 0:
             if config.checkpoint_model:
                 torch.save(
                     {"step": step, **agent.checkpoint()},
@@ -322,7 +348,7 @@ def main():
                 )
             if config.checkpoint_buffer:
                 # Only the rows added since the previous save: full copies at
-                # every evaluation would grow quadratically on disk. The online
+                # every save would grow quadratically on disk. The online
                 # buffer holds one row per step and never wraps, so
                 # concatenating the files in step order rebuilds it.
                 torch.save(
