@@ -118,6 +118,9 @@ A takeover lasts until the episode ends with probability
 `--full_takeover_prob` (0.5), otherwise for a uniform number of steps in
 [`--min_takeover_steps`, `--max_takeover_steps`] (10 to 40). Intervention
 transitions are flagged in the replay buffer; evaluation is always autonomous.
+The human is active from the first step, as in Q-OIL's Algorithm 1. Updates
+start after `--start_training` (200) random-action steps, the only "training
+starts" value the paper gives; this repo used 5,000 before.
 
 **Q-OIL** (`AgentConfig`) learns from the flagged transitions:
 

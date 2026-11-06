@@ -46,7 +46,12 @@ class TrainConfig:
     # (RLPD's own default is 20, about twice as slow).
     utd_ratio: int = 10
     max_steps: int = 300_000  # environment steps
-    start_training: int = 5_000  # random-action steps before updates begin
+    # Random-action steps before updates begin. 200 is the only "training
+    # starts" value Q-OIL gives (its VLA table); with demos in every batch a
+    # long random warm-up is not needed, and a short one keeps synthetic-human
+    # takeovers of random flailing out of the BC buffer. This repo used 5,000
+    # before. Not 0: the first updates would sample an empty online buffer.
+    start_training: int = 200
     pretrain_steps: int = 0  # demo-only updates before online training
     eval_interval: int = 5_000
     eval_episodes: int = 10
