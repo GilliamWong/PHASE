@@ -129,12 +129,25 @@ starts" value the paper gives; this repo used 5,000 before.
   bootstrapping from the task critic's targets, and has the actor maximize it.
   Without it, the bonus enters the single critic (the paper's no-decoupling
   ablation);
-- `--bc_weight=λ` adds `-λ E[log π(a | s)]` over intervention transitions,
-  sampled from their own buffer (Q-OIL's D_int).
+- `--bc_weight=λ` adds a BC term, weighted by λ, over intervention
+  transitions sampled from their own buffer (Q-OIL's D_int). `--bc_loss`
+  picks its form, which the paper does not give: `log_prob` (default),
+  `-E[log π(a | s)]`, or `mse`, `E[Σ_i (tanh(μ_i(s)) - a_i)²]` on the mean
+  action.
+
+On a deterministic corrector, `log_prob` keeps rising as the policy's std
+shrinks, so its gradient grows during training and λ does not fix BC's
+strength: in our fixed-temperature Lift BC+RL run, BC's gradient was about
+20 times the critic's and the policy's entropy fell to about -10. `mse` is
+bounded and leaves the std to the entropy term.
+The same λ means a different strength under each form (MSE BC can become
+nearly negligible once the mean is close), so compare forms at matched
+`actor_grad_norm_bc / actor_grad_norm_q`, or over a few λ, not at equal λ.
 
 The tanh policy's log-density is infinite at actions of exactly ±1, which a
 corrector's gripper (and other saturated dimensions) can produce, so BC first
-clamps intervention actions to within `--bc_action_eps` (1e-5) of ±1. For
+clamps intervention actions to within `--bc_action_eps` (1e-5) of ±1 (for
+`--bc_loss=log_prob`; `mse` needs no clamp). For
 those actions, eps sets BC's pre-tanh target (`atanh(1 - eps)`, about 6.1)
 and so the size of its gradient; it also adds a constant, `log(2 eps)`, to
 the BC loss. The paper does not say how it handles ±1, so before drawing
@@ -151,8 +164,11 @@ python -m rlpd.train --dataset=lift/ph --num_demos=20 --utd_ratio=10 \
 
 with `--bonus=0 --no-optimistic_critic` giving BC+RL and also
 `--bc_weight=0` giving HIL (interventions in the buffer only). The paper fixes
-the temperature but gives no value for these tasks; this code keeps RLPD's
-learned temperature.
+the temperature but gives no value for these tasks; `--init_temperature=0.01
+--temp_lr=0` fixes it at 0.01, the value its VLA table gives. Use that for
+BC runs: with a learned temperature, BC narrows the policy, the temperature
+rises about 20 times to widen it again, and BC+RL on Lift fell from 0.49 to
+0.32 average success.
 
 Extra TensorBoard metrics:
 
@@ -198,6 +214,7 @@ Without `--steps` it evaluates every checkpoint.
 | `rlpd/human.py` | `HumanConfig` and `SyntheticHuman`: the gate and the corrector that take over during training |
 | `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
 | `scripts/evaluate_checkpoints.py` | Re-evaluates a run's saved checkpoints on many episodes (see [Evaluating checkpoints](#evaluating-checkpoints)) |
+| `scripts/summarize_runs.py` | One row per run from its TensorBoard logs: success averaged over training (Q-OIL's Fig. 10 metric), steps to 80% success, intervention share, critic gap and actor gradient norms. Compare runs with the same `--max_steps` and `--eval_interval`. `python -m scripts.summarize_runs runs/pilot_*` |
 
 ### The CUDA graph, and what it means for new losses
 

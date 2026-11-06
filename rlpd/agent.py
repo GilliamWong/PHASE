@@ -57,8 +57,16 @@ class AgentConfig:
     # the task critic's target network so the bonus does not propagate to
     # earlier states. The actor maximizes it instead of the task critic.
     optimistic_critic: bool = False
-    # Weight of the BC term, -E[log pi(a | s)] over intervention (s, a).
+    # Weight of the BC term over intervention (s, a).
     bc_weight: float = 0.0
+    # The BC term's form, which the paper does not give:
+    # "log_prob": -E[log pi(a | s)]. On a deterministic corrector it can
+    #   grow without bound as the policy's std shrinks (log_std reaches -20),
+    #   so bc_weight does not fix its strength;
+    # "mse": E[sum_i (tanh(mean_i(s)) - a_i)^2], on the mean action only. It
+    #   is bounded (at most 4 per action dimension) and leaves the std to
+    #   the entropy term.
+    bc_loss: str = "log_prob"
     # BC clamps intervention actions to within this of +-1, where the tanh
     # policy's log-density is infinite. For saturated actions it sets BC's
     # pre-tanh target (atanh(1 - eps), about 6.1 at 1e-5) and so the BC
@@ -229,6 +237,8 @@ class RLPDAgent(nn.Module):
             # 1 - eps would round to 1 in float32, making BC's log-density
             # infinite and the actor's weights NaN.
             raise ValueError(f"bc_action_eps={config.bc_action_eps} is too small for float32")
+        if config.bc_loss not in ("log_prob", "mse"):
+            raise ValueError(f"unknown bc_loss {config.bc_loss!r}; use 'log_prob' or 'mse'")
         self.config = config
         self.device = device
         self.obs_dim = obs_dim
@@ -384,15 +394,19 @@ class RLPDAgent(nn.Module):
         temperature = self.log_temp.exp().detach()
         terms = {"q": -q.mean(), "entropy": (temperature * log_probs).mean()}
         if self.config.bc_weight > 0:
-            bc_log_probs = self.actor.log_prob(
-                intervention_batch.observations,
-                intervention_batch.actions,
-                self.config.bc_action_eps,
-            )
+            if self.config.bc_loss == "mse":
+                errors = self.actor.mode(intervention_batch.observations) - intervention_batch.actions
+                per_sample = (errors**2).sum(-1)
+            else:
+                per_sample = -self.actor.log_prob(
+                    intervention_batch.observations,
+                    intervention_batch.actions,
+                    self.config.bc_action_eps,
+                )
             # Every stored intervention row has interventions = 1. Before the
             # first intervention, sampling the empty buffer returns all-zero
             # rows, which this weight drops.
-            bc_loss = -(intervention_batch.interventions * bc_log_probs).mean()
+            bc_loss = (intervention_batch.interventions * per_sample).mean()
             terms["bc"] = self.config.bc_weight * bc_loss
         return terms, log_probs
 

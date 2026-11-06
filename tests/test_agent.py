@@ -177,6 +177,24 @@ def test_actor_gradient_norms_measure_each_term_without_updating():
         torch.testing.assert_close(value, weights[name], rtol=0, atol=0)
 
 
+def test_mse_bc_fits_the_mean_action_and_leaves_the_std_alone():
+    # Catches the MSE form computing a different loss, or still training the
+    # std, which is what lets the log_prob form grow without bound.
+    config = AgentConfig(hidden_dims=(32, 32), num_qs=4, bc_weight=0.1, bc_loss="mse")
+    agent = RLPDAgent(5, 2, config, torch.device("cpu"))
+    interventions = _repeated_row_buffer(5, 2, 16, torch.device("cpu"), intervention=True)
+    batch = interventions.split(interventions.sample_rows((16,)))
+
+    terms, _ = agent._actor_loss_terms(torch.randn(16, 5), batch)
+    std_grads = torch.autograd.grad(terms["bc"], list(agent.actor.log_std.parameters()), allow_unused=True)
+
+    with torch.no_grad():
+        mean, _ = agent.actor(batch.observations)
+    expected = 0.1 * ((np.tanh(mean.numpy()) - batch.actions.numpy()) ** 2).sum(-1).mean()
+    np.testing.assert_allclose(terms["bc"].item(), expected, rtol=1e-5)
+    assert all(g is None or (g == 0).all() for g in std_grads)
+
+
 def test_bc_action_eps_below_float32_resolution_is_rejected():
     # Catches an eps whose 1 - eps rounds to 1 in float32, which would make
     # BC's log-density infinite and the actor NaN partway through a run.
