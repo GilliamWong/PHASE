@@ -39,6 +39,8 @@ def test_demos_end_at_first_success(tmp_path):
 
     np.testing.assert_array_equal(transitions.rewards, [0, 0, 0, 10, 0, 0, 0])
     np.testing.assert_array_equal(transitions.masks, [1, 1, 1, 0, 1, 1, 1])
+    # Demos must never get Q-OIL's intervention bonus.
+    assert (transitions.interventions == 0).all()
     assert (transitions.actions.abs() < 1).all()
     with h5py.File(path) as f:
         demo = f["data/demo_2"]
@@ -49,24 +51,43 @@ def test_demos_end_at_first_success(tmp_path):
     np.testing.assert_allclose(transitions.next_observations[:4], expected_next, rtol=1e-6)
 
 
+def test_num_demos_keeps_the_first_demos_in_numeric_order(tmp_path):
+    # Catches num_demos picking demos in string order (demo_10 before demo_2)
+    # or ignoring the limit.
+    path = tmp_path / "demos.hdf5"
+    rng = np.random.default_rng(0)
+    with h5py.File(path, "w") as f:
+        _write_demo(f.create_group("data/demo_2"), [0, 1], rng)
+        _write_demo(f.create_group("data/demo_10"), [0, 0, 0], rng)
+
+    buffer = load_demo_buffer(str(path), 10.0, torch.device("cpu"), num_demos=1)
+
+    np.testing.assert_array_equal(buffer.split(buffer.rows).rewards, [0, 10])
+
+
 def _buffer_with(values, capacity, obs_dim=2, action_dim=1):
-    """A buffer whose i-th added transition has every field equal to values[i]."""
+    """A buffer whose i-th added transition has every field equal to values[i],
+    except the intervention flag, which is 1."""
     buffer = TransitionBuffer(obs_dim, action_dim, capacity, torch.device("cpu"))
     for v in values:
-        buffer.add(np.full(obs_dim, v), np.full(action_dim, v), v, v, np.full(obs_dim, v))
+        buffer.add(
+            np.full(obs_dim, v), np.full(action_dim, v), v, v, np.full(obs_dim, v), intervention=True
+        )
     return buffer
 
 
 def test_fields_round_trip_through_rows():
     # Catches column slices that disagree between add() and split().
     buffer = TransitionBuffer(2, 3, 4, torch.device("cpu"))
-    buffer.add(np.array([1, 2]), np.array([3, 4, 5]), 6.0, 0.0, np.array([7, 8]))
+    buffer.add(
+        np.array([1, 2]), np.array([3, 4, 5]), 6.0, 0.0, np.array([7, 8]), intervention=True
+    )
 
     batch = buffer.split(buffer.rows[:1])
 
     np.testing.assert_array_equal(batch.observations[0], [1, 2])
     np.testing.assert_array_equal(batch.actions[0], [3, 4, 5])
-    assert batch.rewards[0] == 6 and batch.masks[0] == 0
+    assert batch.rewards[0] == 6 and batch.masks[0] == 0 and batch.interventions[0] == 1
     np.testing.assert_array_equal(batch.next_observations[0], [7, 8])
 
 

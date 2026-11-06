@@ -16,6 +16,8 @@ class Batch(NamedTuple):
     # 0 where the episode truly terminated (success), so the target does not
     # bootstrap; time-limit truncations keep 1.
     masks: torch.Tensor
+    # 1 where a (synthetic) human chose the action, else 0.
+    interventions: torch.Tensor
     next_observations: torch.Tensor
 
 
@@ -23,7 +25,7 @@ class TransitionBuffer:
     """A fixed-capacity ring buffer of transitions, kept on `device`.
 
     Each transition is one row [observation | action | reward | mask |
-    next_observation], so sampling a batch is a single gather. The fill level
+    intervention | next_observation], so sampling a batch is a single gather. The fill level
     is also kept on the device, so sampling never waits on the host and can be
     recorded into a CUDA graph.
     """
@@ -32,7 +34,7 @@ class TransitionBuffer:
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.capacity = capacity
-        self.rows = torch.zeros((capacity, 2 * obs_dim + action_dim + 2), device=device)
+        self.rows = torch.zeros((capacity, 2 * obs_dim + action_dim + 3), device=device)
         self._num_added = 0
         # float64 so that rand * size stays below size for any realistic capacity.
         self._size = torch.zeros((), dtype=torch.float64, device=device)
@@ -40,17 +42,36 @@ class TransitionBuffer:
     def __len__(self) -> int:
         return min(self._num_added, self.capacity)
 
-    def add(self, observation, action, reward: float, mask: float, next_observation):
-        row = np.concatenate([observation, action, [reward, mask], next_observation])
+    def add(
+        self,
+        observation,
+        action,
+        reward: float,
+        mask: float,
+        next_observation,
+        intervention: bool = False,
+    ):
+        row = np.concatenate(
+            [observation, action, [reward, mask, float(intervention)], next_observation]
+        )
         self.rows[self._num_added % self.capacity] = torch.from_numpy(row.astype(np.float32))
         self._num_added += 1
         self._size.fill_(len(self))
 
     def add_many(self, observations, actions, rewards, masks, next_observations):
-        """Fills an empty buffer with arrays of transitions (one per row)."""
+        """Fills an empty buffer with arrays of transitions (one per row),
+        such as demonstrations; none of them are interventions."""
         assert self._num_added == 0 and len(rewards) <= self.capacity
+        interventions = np.zeros_like(rewards)
         rows = np.concatenate(
-            [observations, actions, rewards[:, None], masks[:, None], next_observations],
+            [
+                observations,
+                actions,
+                rewards[:, None],
+                masks[:, None],
+                interventions[:, None],
+                next_observations,
+            ],
             axis=1,
         )
         self.rows[: len(rows)] = torch.from_numpy(rows.astype(np.float32))
@@ -69,7 +90,8 @@ class TransitionBuffer:
             actions=rows[..., o : o + a],
             rewards=rows[..., o + a],
             masks=rows[..., o + a + 1],
-            next_observations=rows[..., o + a + 2 :],
+            interventions=rows[..., o + a + 2],
+            next_observations=rows[..., o + a + 3 :],
         )
 
 
@@ -98,10 +120,15 @@ def _demo_names(data_group: h5py.Group) -> list:
 
 
 def load_demo_buffer(
-    dataset_path: str, success_reward: float, device: torch.device, eps: float = 1e-5
+    dataset_path: str,
+    success_reward: float,
+    device: torch.device,
+    num_demos: Optional[int] = None,
+    eps: float = 1e-5,
 ) -> TransitionBuffer:
     """Robomimic demos as a full TransitionBuffer of (s, a, r, s') transitions
-    in RobomimicEnv's MDP.
+    in RobomimicEnv's MDP: the first num_demos in the file's numeric order, or
+    all of them when None.
 
     RobomimicEnv ends an episode at the first success, so each demo is cut
     there: that step becomes terminal with reward success_reward, and the
@@ -111,7 +138,12 @@ def load_demo_buffer(
     columns = {k: [] for k in ("observations", "actions", "rewards", "masks", "next_observations")}
     with h5py.File(dataset_path, "r") as f:
         data = f["data"]
-        for name in _demo_names(data):
+        names = _demo_names(data)
+        if num_demos is not None:
+            if not 0 < num_demos <= len(names):
+                raise ValueError(f"num_demos={num_demos}, but the dataset has {len(names)} demos")
+            names = names[:num_demos]
+        for name in names:
             demo = data[name]
             success_steps = np.flatnonzero(demo["rewards"][:] > 0)
             succeeded = len(success_steps) > 0

@@ -1,4 +1,4 @@
-"""Checks the RLPD agent's math and its CUDA-graph update."""
+"""Checks the RLPD agent's math, its Q-OIL options and its CUDA-graph update."""
 
 import numpy as np
 import pytest
@@ -9,6 +9,9 @@ from rlpd.agent import Actor, AgentConfig, EnsembleCritic, RLPDAgent, capture_cu
 from rlpd.data import TransitionBuffer, sample_mixed
 
 SMALL = AgentConfig(hidden_dims=(32, 32), num_qs=4, num_min_qs=2)
+SMALL_QOIL = AgentConfig(
+    hidden_dims=(32, 32), num_qs=4, num_min_qs=2, bonus=0.5, optimistic_critic=True, bc_weight=0.1
+)
 
 
 def test_log_prob_matches_change_of_variables_reference():
@@ -21,10 +24,16 @@ def test_log_prob_matches_change_of_variables_reference():
         mean, std = actor(observations)
         actions, log_probs = actor.sample(observations)
 
+        given_log_probs = actor.log_prob(observations, actions, eps=1e-5)
+
     a = actions.numpy()
     expected = norm.logpdf(np.arctanh(a), mean.numpy(), std.numpy()).sum(-1)
     expected -= np.log1p(-(a**2)).sum(-1)
     np.testing.assert_allclose(log_probs.numpy(), expected, rtol=1e-6)
+    # The BC term's density of given actions, where log_prob does not clamp.
+    unclamped = (np.abs(a) < 1 - 1e-5).all(-1)
+    assert unclamped.sum() >= 2
+    np.testing.assert_allclose(given_log_probs.numpy()[unclamped], expected[unclamped], rtol=1e-6)
 
 
 def test_log_prob_stays_finite_for_saturated_actions():
@@ -52,11 +61,27 @@ def _buffer(obs_dim, action_dim, num_rows, masks, seed=0):
     return buffer
 
 
-def test_update_runs_and_is_finite():
-    buffer = _buffer(5, 2, 64, masks=1.0)
-    agent = RLPDAgent(5, 2, SMALL, torch.device("cpu"))
+def _repeated_row_buffer(obs_dim, action_dim, num_rows, device, intervention):
+    """num_rows copies of one random transition with mask 0 (terminal)."""
+    rng = np.random.default_rng(0)
+    obs, next_obs = rng.normal(size=obs_dim), rng.normal(size=obs_dim)
+    action = rng.uniform(-1, 1, action_dim)
+    buffer = TransitionBuffer(obs_dim, action_dim, num_rows, device)
+    for _ in range(num_rows):
+        buffer.add(obs, action, 1.0, 0.0, next_obs, intervention=intervention)
+    return buffer
 
-    info = agent.update(sample_mixed(None, buffer, 0, 16, num_minibatches=3))
+
+@pytest.mark.parametrize("config", [SMALL, SMALL_QOIL], ids=["rlpd", "qoil"])
+def test_update_runs_and_is_finite(config):
+    buffer = _buffer(5, 2, 64, masks=1.0)
+    agent = RLPDAgent(5, 2, config, torch.device("cpu"))
+    interventions = _repeated_row_buffer(5, 2, 16, torch.device("cpu"), intervention=True)
+
+    info = agent.update(
+        sample_mixed(None, buffer, 0, 16, num_minibatches=3),
+        interventions.split(interventions.sample_rows((16,))),
+    )
 
     assert all(torch.isfinite(v) for v in info.values())
     action = agent.act(np.zeros(5, np.float32))
@@ -87,27 +112,117 @@ def test_parallel_streams_match_running_critics_one_by_one():
         torch.testing.assert_close(parallel_grad, p.grad, rtol=0, atol=0)
 
 
+def test_decoupling_keeps_the_bonus_out_of_earlier_states():
+    # Catches the optimistic critic bootstrapping from itself (or the bonus
+    # reaching the task critic), which would let the bonus propagate back
+    # from intervention states: Q-OIL's central design choice. Also checks
+    # that the no-decoupling ablation does propagate it.
+    # Chain s0 -> s1 -> end, reward 0; only the step from s1 is an
+    # intervention. Decoupled, Q_opt(s0) stays at Q_TD(s0) = 0; coupled,
+    # Q(s0) learns discount * bonus.
+    s0, s1, action = np.array([1.0, 0.0]), np.array([0.0, 1.0]), np.zeros(1)
+    buffer = TransitionBuffer(2, 1, 2, torch.device("cpu"))
+    buffer.add(s0, action, 0.0, 1.0, s1, intervention=False)
+    buffer.add(s1, action, 0.0, 0.0, s1, intervention=True)
+    bonus, discount = 5.0, 0.99
+    s0_and_s1 = torch.tensor(np.stack([s0, s1]), dtype=torch.float32)
+    actions = torch.zeros(2, 1)
+
+    results = {}
+    for decoupled in (True, False):
+        torch.manual_seed(0)
+        config = AgentConfig(
+            hidden_dims=(32, 32),
+            num_qs=2,
+            num_min_qs=2,
+            critic_lr=3e-3,
+            discount=discount,
+            tau=0.05,
+            bonus=bonus,
+            optimistic_critic=decoupled,
+        )
+        agent = RLPDAgent(2, 1, config, torch.device("cpu"))
+        for _ in range(300):
+            agent.update(sample_mixed(None, buffer, 0, 8, num_minibatches=4))
+        with torch.no_grad():
+            task_q = agent.critic(s0_and_s1, actions).mean(0)
+            policy_critic = agent.optimistic_critic if decoupled else agent.critic
+            policy_q = policy_critic(s0_and_s1, actions).mean(0)
+        results[decoupled] = (task_q, policy_q)
+
+    task_q, optimistic_q = results[True]
+    assert task_q.abs().max() < 0.25  # the task critic never sees the bonus
+    assert abs(optimistic_q[1] - bonus) < 0.5  # the bonus at the intervention...
+    assert abs(optimistic_q[0]) < 0.25  # ...and none at the state before it
+    coupled_q = results[False][1]
+    assert abs(coupled_q[0] - discount * bonus) < 0.5
+
+
+def test_actor_gradient_norms_measure_each_term_without_updating():
+    # Catches the diagnostic changing weights, missing a term, or giving the
+    # BC term weight before any intervention exists (D_int sampled empty).
+    agent = RLPDAgent(5, 2, SMALL_QOIL, torch.device("cpu"))
+    observations = torch.randn(16, 5)
+    filled = _repeated_row_buffer(5, 2, 16, torch.device("cpu"), intervention=True)
+    empty = TransitionBuffer(5, 2, 16, torch.device("cpu"))
+    weights = {k: v.clone() for k, v in agent.state_dict().items()}
+
+    norms = agent.actor_gradient_norms(observations, filled.split(filled.sample_rows((16,))))
+    empty_norms = agent.actor_gradient_norms(observations, empty.split(empty.sample_rows((16,))))
+
+    assert set(norms) == {"actor_grad_norm_q", "actor_grad_norm_entropy", "actor_grad_norm_bc"}
+    assert all(torch.isfinite(v) and v > 0 for v in norms.values())
+    assert empty_norms["actor_grad_norm_bc"] == 0
+    for name, value in agent.state_dict().items():
+        torch.testing.assert_close(value, weights[name], rtol=0, atol=0)
+
+
+def test_bc_action_eps_below_float32_resolution_is_rejected():
+    # Catches an eps whose 1 - eps rounds to 1 in float32, which would make
+    # BC's log-density infinite and the actor NaN partway through a run.
+    with pytest.raises(ValueError, match="bc_action_eps"):
+        RLPDAgent(5, 2, AgentConfig(bc_action_eps=1e-9), torch.device("cpu"))
+
+
+def test_checkpoint_round_trip_rebuilds_the_agent(tmp_path):
+    # Catches checkpoints missing what a corrector needs to be rebuilt
+    # (config, dimensions, the optimistic critic's weights).
+    agent = RLPDAgent(5, 2, SMALL_QOIL, torch.device("cpu"))
+    path = tmp_path / "step_0000000.pt"
+    torch.save(agent.checkpoint(), path)
+
+    loaded = RLPDAgent.from_checkpoint(str(path), torch.device("cpu"))
+
+    observation = np.random.default_rng(0).normal(size=5).astype(np.float32)
+    np.testing.assert_array_equal(
+        loaded.act(observation, deterministic=True), agent.act(observation, deterministic=True)
+    )
+    for name, value in agent.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[name], value, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-def test_cuda_graph_replay_matches_eager_updates():
+@pytest.mark.parametrize("config", [SMALL, SMALL_QOIL], ids=["rlpd", "qoil"])
+def test_cuda_graph_replay_matches_eager_updates(config):
     # Catches replays that do not really update: tensors captured by value,
     # Adam's step count frozen on the host, or the target critic not tracked.
     # With masks 0 and identical rows, critic updates are deterministic, so the
-    # graph and the eager loop must reach the same critic.
+    # graph and the eager loop must reach the same critics.
     device = torch.device("cuda")
     obs_dim, action_dim = 5, 2
-    row = _buffer(obs_dim, action_dim, 1, masks=0.0)
-    buffer = TransitionBuffer(obs_dim, action_dim, 64, device)
-    rows = row.rows.expand(64, -1).numpy()
-    o, a = obs_dim, action_dim
-    buffer.add_many(rows[:, :o], rows[:, o : o + a], rows[:, o + a], rows[:, o + a + 1], rows[:, o + a + 2 :])
+    # Every row an intervention, so Q-OIL's bonus and BC term are exercised.
+    buffer = _repeated_row_buffer(obs_dim, action_dim, 64, device, intervention=True)
 
     torch.manual_seed(0)
-    eager = RLPDAgent(obs_dim, action_dim, SMALL, device)
-    graphed = RLPDAgent(obs_dim, action_dim, SMALL, device)
+    eager = RLPDAgent(obs_dim, action_dim, config, device)
+    graphed = RLPDAgent(obs_dim, action_dim, config, device)
     graphed.load_state_dict(eager.state_dict())
 
     def step(agent):
-        return lambda: agent.update(sample_mixed(None, buffer, 0, 16, num_minibatches=4))
+        return lambda: agent.update(
+            sample_mixed(None, buffer, 0, 16, num_minibatches=4),
+            buffer.split(buffer.sample_rows((16,))),
+        )
 
     initial_actor_weight = graphed.actor.mean.weight.detach().clone()
     replay = capture_cuda_graph(step(graphed), num_warmup=3)
@@ -118,7 +233,10 @@ def test_cuda_graph_replay_matches_eager_updates():
         step(eager)()
     torch.cuda.synchronize()
 
-    for name in ("critic", "target_critic"):
+    critics = ["critic", "target_critic"]
+    if config.optimistic_critic:
+        critics.append("optimistic_critic")
+    for name in critics:
         for p_eager, p_graph in zip(getattr(eager, name).parameters(), getattr(graphed, name).parameters()):
             torch.testing.assert_close(p_graph, p_eager, rtol=1e-4, atol=1e-5)
     # The actor's updates are random, so only check that replays move it.
