@@ -135,6 +135,7 @@ MUJOCO_LOG.TXT
 runs/*
 !runs/*/
 runs/_local_logs/
+runs/_killed/
 runs/*/**
 !runs/*/config.json
 !runs/*/events.out.tfevents.*

@@ -193,6 +193,8 @@ def test_mse_bc_fits_the_mean_action_and_leaves_the_std_alone():
     expected = 0.1 * ((np.tanh(mean.numpy()) - batch.actions.numpy()) ** 2).sum(-1).mean()
     np.testing.assert_allclose(terms["bc"].item(), expected, rtol=1e-5)
     assert all(g is None or (g == 0).all() for g in std_grads)
+    # The gradient-norm diagnostic must cope with the unused std weights.
+    assert agent.actor_gradient_norms(torch.randn(16, 5), batch)["actor_grad_norm_bc"] > 0
 
 
 def test_bc_action_eps_below_float32_resolution_is_rejected():

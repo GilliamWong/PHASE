@@ -457,9 +457,10 @@ class RLPDAgent(nn.Module):
         params = list(self.actor.parameters())
         norms = {}
         for name, term in terms.items():
-            grads = torch.autograd.grad(term, params, retain_graph=True)
+            # allow_unused: MSE BC never touches the log-std weights.
+            grads = torch.autograd.grad(term, params, retain_graph=True, allow_unused=True)
             norms[f"actor_grad_norm_{name}"] = torch.linalg.vector_norm(
-                torch.cat([g.flatten() for g in grads])
+                torch.cat([g.flatten() for g in grads if g is not None])
             )
         for critic in critics:
             critic.requires_grad_(True)
