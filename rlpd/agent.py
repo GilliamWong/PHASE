@@ -27,6 +27,8 @@ from torch import nn
 from rlpd.data import Batch
 
 _HALF_LOG_2PI = 0.5 * math.log(2.0 * math.pi)
+# state_dict keys an actor-only checkpoint keeps: all that acting needs.
+ACTOR_ONLY_PREFIXES = ("actor.", "log_temp")
 
 
 @dataclass
@@ -286,11 +288,21 @@ class RLPDAgent(nn.Module):
     @classmethod
     def from_checkpoint(cls, path: str, device: torch.device) -> "RLPDAgent":
         """Loads a checkpoint written by train.py, for acting or evaluation
-        (the optimizer state is not restored)."""
+        (the optimizer state is not restored). Checkpoints slimmed by
+        scripts/slim_runs.py to the actor ("actor_only") load the actor and
+        temperature only; their critics stay at initialization."""
         checkpoint = torch.load(path, map_location=device)
         config = AgentConfig(**checkpoint["config"])
         agent = cls(checkpoint["obs_dim"], checkpoint["action_dim"], config, device)
-        agent.load_state_dict(checkpoint["model"])
+        if checkpoint.get("actor_only"):
+            missing, unexpected = agent.load_state_dict(checkpoint["model"], strict=False)
+            # A missing actor weight would silently act with a random policy.
+            missing_actor = [k for k in missing if k.startswith(ACTOR_ONLY_PREFIXES)]
+            if missing_actor or unexpected:
+                raise ValueError(f"{path}: actor-only checkpoint is missing {missing_actor} "
+                                 f"or has unexpected {unexpected}")
+        else:
+            agent.load_state_dict(checkpoint["model"])
         return agent
 
     @torch.no_grad()

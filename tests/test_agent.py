@@ -221,6 +221,36 @@ def test_checkpoint_round_trip_rebuilds_the_agent(tmp_path):
         torch.testing.assert_close(loaded.state_dict()[name], value, rtol=0, atol=0)
 
 
+def test_slimmed_checkpoints_act_the_same_and_reject_missing_actor_weights(tmp_path):
+    # Catches slimming that changes the policy, drops the critics it should
+    # keep, or an actor-only load that silently acts with random weights.
+    from scripts.slim_runs import slim_run
+
+    agent = RLPDAgent(5, 2, SMALL_QOIL, torch.device("cpu"))
+    checkpoints = tmp_path / "checkpoints"
+    checkpoints.mkdir()
+    for step in (0, 50000, 60000):
+        torch.save({"step": step, **agent.checkpoint()}, checkpoints / f"step_{step:07d}.pt")
+
+    slim_run(str(tmp_path), {50000})
+
+    observation = np.random.default_rng(0).normal(size=5).astype(np.float32)
+    expected = agent.act(observation, deterministic=True)
+    for step in (0, 50000, 60000):
+        path = str(checkpoints / f"step_{step:07d}.pt")
+        np.testing.assert_array_equal(
+            RLPDAgent.from_checkpoint(path, torch.device("cpu")).act(observation, deterministic=True), expected
+        )
+        saved = torch.load(path)
+        assert "critic_optimizer" not in saved
+        assert saved.get("actor_only", False) == (step == 0)  # 50k asked for, 60k the last
+    broken = torch.load(checkpoints / "step_0000000.pt")
+    del broken["model"][next(k for k in broken["model"] if k.startswith("actor."))]
+    torch.save(broken, checkpoints / "broken.pt")
+    with pytest.raises(ValueError, match="missing"):
+        RLPDAgent.from_checkpoint(str(checkpoints / "broken.pt"), torch.device("cpu"))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("config", [SMALL, SMALL_QOIL], ids=["rlpd", "qoil"])
 def test_cuda_graph_replay_matches_eager_updates(config):
