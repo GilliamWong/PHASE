@@ -174,50 +174,52 @@ def imitation(out):
     fig.savefig(os.path.join(out, "fig2_imitation.png"), dpi=200, facecolor="white")
 
 
+# The two takeover rules we trained under: line style marks the rule in figures that show both.
+RULES = {"full": ("half run to the episode's end", "-"), "cap100": ("every takeover 10-100 steps", "--")}
+
+
 def imitation_over_training(out):
-    """Distance from the corrector over training, and Q-OIL's interventions: the share of its replay
-    buffer they make up against the per-episode intervention rate the paper's annealing argument uses."""
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+    """Distance from the corrector over training, and the share of Q-OIL's replay buffer that is
+    intervention transitions, under both takeover rules."""
+    from matplotlib.lines import Line2D
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.9))
     ax = axes[0]
-    for name, exp in (("Q-OIL", "f10_full_qoil_b0.025"), ("BC+RL", "f10_full_bcrl"), ("HIL", "f10_full_hil"),
-                      ("Q-OIL w/o BC", "f10_full_nobc_b0.025")):
-        curves = [{int(r["step"]): float(r["d_corrector"]) for r in csv.DictReader(open(path))}
-                  for path in glob.glob(f"runs/{exp}_lift_ph_s*/imitation.csv")]
-        steps = sorted(set.intersection(*(set(c) for c in curves)))
-        ax.plot(np.array(steps) / 1000, [np.mean([c[s] for c in curves]) for s in steps], color=COLORS[name],
-                linewidth=2.5 if name == "Q-OIL" else 1.5, marker="o", markersize=4,
-                label=f"{name} ({len(curves)} seeds)")
+    for rule, (_, line) in RULES.items():
+        for name, arm in (("Q-OIL", "qoil_b0.025"), ("BC+RL", "bcrl"), ("HIL", "hil"), ("Q-OIL w/o BC", "nobc_b0.025")):
+            curves = [{int(r["step"]): float(r["d_corrector"]) for r in csv.DictReader(open(path))}
+                      for path in glob.glob(f"runs/f10_{rule}_{arm}_lift_ph_s*/imitation.csv")]
+            steps = sorted(set.intersection(*(set(c) for c in curves)))
+            ax.plot(np.array(steps) / 1000, [np.mean([c[s] for c in curves]) for s in steps], color=COLORS[name],
+                    linewidth=2.2 if name == "Q-OIL" else 1.4, linestyle=line, marker="o", markersize=3)
     ax.set_ylim(0, 2.0)
     ax.set_ylabel("Distance from the corrector's action", color=INK, fontsize=9)
-    ax.set_title("Distance from the corrector at its takeover states", fontsize=10, color=INK)
-    ax.legend(frameon=False, fontsize=8, loc="center right")
+    ax.set_title("Distance from the corrector at its takeover states (2 seeds)", fontsize=10, color=INK)
+    handles = [Line2D([], [], color=COLORS[n], linewidth=2) for n in ("Q-OIL", "BC+RL", "HIL", "Q-OIL w/o BC")]
+    ax.legend(handles, ["Q-OIL", "BC+RL", "HIL", "Q-OIL w/o BC"], frameon=False, fontsize=8, loc="center right")
 
     ax = axes[1]
-    bins = np.arange(0, 100_001, 10_000)
-    share, rate = [], []
-    for run_dir in sorted(glob.glob("runs/f10_full_qoil_b0.025_lift_ph_s*")):
-        acc = EventAccumulator(run_dir, size_guidance={"scalars": 0})
-        acc.Reload()
-        events = acc.Scalars("training/total_intervention_steps")
-        steps = np.array([e.step + 1 for e in events])
-        total = np.array([e.value for e in events])
-        at = np.interp(bins[1:], steps, total)  # cumulative intervention steps at each bin edge
-        share.append(at / bins[1:])
-        rate.append(np.diff(np.concatenate([[0], at])) / np.diff(bins))
-    x = bins[1:] / 1000
-    ax.plot(x, 100 * np.mean(share, 0), color=COLORS["Q-OIL"], linewidth=2.5,
-            label="Share of the replay buffer")
-    ax.plot(x, 100 * np.mean(rate, 0), color=COLORS["Q-OIL"], linewidth=1.5, linestyle="--",
-            label="Share of steps in each 10k-step window")
-    ax.set_ylim(0, 60)
-    ax.set_ylabel("Intervention transitions (%)", color=INK, fontsize=9)
-    ax.set_title(f"Q-OIL's interventions ({len(share)} seeds)", fontsize=10, color=INK)
-    ax.legend(frameon=False, fontsize=8, loc="upper right")
+    bins = np.arange(10_000, 100_001, 5_000)
+    for rule, (label, line) in RULES.items():
+        share = []
+        for run_dir in sorted(glob.glob(f"runs/f10_{rule}_qoil_b0.025_lift_ph_s*")):
+            acc = EventAccumulator(run_dir, size_guidance={"scalars": 0})
+            acc.Reload()
+            events = acc.Scalars("training/total_intervention_steps")
+            at = np.interp(bins, [e.step + 1 for e in events], [e.value for e in events])
+            share.append(at / bins)  # cumulative intervention steps over all steps so far
+        ax.plot(bins / 1000, 100 * np.mean(share, 0), color=COLORS["Q-OIL"], linewidth=2.2, linestyle=line)
+    ax.set_ylim(0, 50)
+    ax.set_ylabel("Interventions in Q-OIL's replay buffer (%)", color=INK, fontsize=9)
+    ax.set_title("Q-OIL's interventions (6 seeds)", fontsize=10, color=INK)
     for ax in axes:
         ax.set_xlim(0, 102)
         ax.set_xlabel("Environment steps (thousands)", color=INK, fontsize=9)
         style(ax)
-    fig.tight_layout()
+    rule_handles = [Line2D([], [], color=MUTED, linewidth=2, linestyle=line) for _, line in RULES.values()]
+    fig.legend(rule_handles, [f"Takeover rule: {label}" for label, _ in RULES.values()], loc="lower center",
+               ncol=2, frameon=False, fontsize=9)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(os.path.join(out, "fig6_imitation_over_training.png"), dpi=200, facecolor="white")
 
 
