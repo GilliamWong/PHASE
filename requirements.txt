@@ -21,3 +21,6 @@ huggingface_hub >= 0.20  # downloads the Robomimic datasets
 # Tests
 pytest >= 8
 scipy >= 1.11
+
+# Write-up figures (scripts/make_writeup_figures.py)
+matplotlib >= 3.8
