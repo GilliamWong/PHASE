@@ -19,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from scripts.aggregate_runs import NAME, run_score
 
@@ -173,6 +174,53 @@ def imitation(out):
     fig.savefig(os.path.join(out, "fig2_imitation.png"), dpi=200, facecolor="white")
 
 
+def imitation_over_training(out):
+    """Distance from the corrector over training, and Q-OIL's interventions: the share of its replay
+    buffer they make up against the per-episode intervention rate the paper's annealing argument uses."""
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+    ax = axes[0]
+    for name, exp in (("Q-OIL", "f10_full_qoil_b0.025"), ("BC+RL", "f10_full_bcrl"), ("HIL", "f10_full_hil"),
+                      ("Q-OIL w/o BC", "f10_full_nobc_b0.025")):
+        curves = [{int(r["step"]): float(r["d_corrector"]) for r in csv.DictReader(open(path))}
+                  for path in glob.glob(f"runs/{exp}_lift_ph_s*/imitation.csv")]
+        steps = sorted(set.intersection(*(set(c) for c in curves)))
+        ax.plot(np.array(steps) / 1000, [np.mean([c[s] for c in curves]) for s in steps], color=COLORS[name],
+                linewidth=2.5 if name == "Q-OIL" else 1.5, marker="o", markersize=4,
+                label=f"{name} ({len(curves)} seeds)")
+    ax.set_ylim(0, 2.0)
+    ax.set_ylabel("Distance from the corrector's action", color=INK, fontsize=9)
+    ax.set_title("Distance from the corrector at its takeover states", fontsize=10, color=INK)
+    ax.legend(frameon=False, fontsize=8, loc="center right")
+
+    ax = axes[1]
+    bins = np.arange(0, 100_001, 10_000)
+    share, rate = [], []
+    for run_dir in sorted(glob.glob("runs/f10_full_qoil_b0.025_lift_ph_s*")):
+        acc = EventAccumulator(run_dir, size_guidance={"scalars": 0})
+        acc.Reload()
+        events = acc.Scalars("training/total_intervention_steps")
+        steps = np.array([e.step + 1 for e in events])
+        total = np.array([e.value for e in events])
+        at = np.interp(bins[1:], steps, total)  # cumulative intervention steps at each bin edge
+        share.append(at / bins[1:])
+        rate.append(np.diff(np.concatenate([[0], at])) / np.diff(bins))
+    x = bins[1:] / 1000
+    ax.plot(x, 100 * np.mean(share, 0), color=COLORS["Q-OIL"], linewidth=2.5,
+            label="Share of the replay buffer")
+    ax.plot(x, 100 * np.mean(rate, 0), color=COLORS["Q-OIL"], linewidth=1.5, linestyle="--",
+            label="Share of steps in each 10k-step window")
+    ax.set_ylim(0, 60)
+    ax.set_ylabel("Intervention transitions (%)", color=INK, fontsize=9)
+    ax.set_title(f"Q-OIL's interventions ({len(share)} seeds)", fontsize=10, color=INK)
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+    for ax in axes:
+        ax.set_xlim(0, 102)
+        ax.set_xlabel("Environment steps (thousands)", color=INK, fontsize=9)
+        style(ax)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out, "fig6_imitation_over_training.png"), dpi=200, facecolor="white")
+
+
 def bc_form(out):
     """Q-OIL against BC+RL for each BC form and corrector detail the paper leaves open."""
     variants = {
@@ -284,7 +332,7 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
     plt.rcParams["font.family"] = "DejaVu Sans"
-    for draw in (fig10, imitation, bc_form, rl_settings, robustness):
+    for draw in (fig10, imitation, imitation_over_training, bc_form, rl_settings, robustness):
         draw(args.out)
         plt.close("all")
         print("drew", draw.__name__)
