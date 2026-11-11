@@ -1,8 +1,11 @@
 # Setup
 
-This code base started from [ikostrikov/rlpd](https://github.com/ikostrikov/rlpd)
-(JAX) and is now a PyTorch port of it, trimmed to what this project uses. It
-runs on the GPU on native Windows and on Linux (tested on an RTX 5070 Ti).
+This branch (`learn-rl`) is a template for implementing RL methods yourself:
+BC, DAgger, DQN, DDPG, TD3 and SAC. The environments, experts, demos, replay
+buffer, logging and evaluation are provided; the networks, the agents and the
+key steps of the training loops are blanks to fill in, all in
+`rlpd/learn.py`. The PHASE/RLPD code is on `main`. It runs on the GPU or CPU,
+on native Windows and on Linux.
 
 ## Install
 
@@ -28,107 +31,90 @@ Linux-only rendering backend it forces). Rerun it after reinstalling robosuite.
 
 ```bash
 python -m pytest tests
+python -m pytest tests/test_learn.py -k dqn   # one method's checks
 ```
 
-The env tests need the Lift and Can datasets in the Hugging Face cache (a
-training run downloads them) and skip otherwise; the CUDA graph test needs a GPU.
+`tests/test_learn.py` checks the pieces of `rlpd/learn.py`; each test fails
+with `NotImplementedError` until the piece it checks is filled in. Besides
+shape and range checks, BC, DQN and SAC must learn a one-step task. DDPG and
+TD3 are checked with a Pendulum run instead (below): their deterministic
+actors can saturate tanh early on that task even when they are correct. The
+env tests need the Lift and Can datasets in the Hugging Face cache (a
+Robomimic training run downloads them) and skip otherwise.
 
-## Running experiments
+## Working through the methods
+
+Search `rlpd/learn.py` for `TODO`. A suggested order:
+
+1. The networks: `DeterministicPolicy`, `QNetwork`, `DiscreteQNetwork`,
+   `GaussianPolicy`.
+2. `BCAgent`, then `--algo=bc`.
+3. The DAgger rollout loop in `train_dagger`, then `--algo=dagger`.
+4. The three blanks in `train_online` (shared by every RL method), then
+   `DQNAgent`.
+5. `DDPGAgent`, `TD3Agent`, `SACAgent`.
 
 ```bash
-python -m rlpd.train --dataset=lift/ph
+python -m rlpd.learn --algo=bc                         # Pendulum-v1 by default
+python -m rlpd.learn --algo=dagger --num_demos=1
+python -m rlpd.learn --algo=dqn
+python -m rlpd.learn --algo=sac --env=MountainCarContinuous-v0
+python -m rlpd.learn --algo=sac --env=robomimic:lift/ph --offline_ratio=0.5 --max_steps=300000
+python -m rlpd.learn --mode=eval --checkpoint=runs/<run>/checkpoints/step_0020000.pt
 tensorboard --logdir runs
 ```
 
-The defaults are RLPD's settings: 10 critics with LayerNorm, 2 of them in each
-target's min, 20 critic updates per environment step, and batches that are half
-demonstrations, half online data. Every field of `TrainConfig`
-(`rlpd/train.py`) and `AgentConfig` (`rlpd/agent.py`) is a flag, e.g.
-`--utd_ratio=10`, `--hidden_dims 256 256`, `--save_video`, `--no-cuda_graph`;
-`python -m rlpd.train --help` lists them.
+Every field of `Config` is a flag (`python -m rlpd.learn --help`).
+`--max_steps` counts environment steps for the RL methods and gradient steps
+for BC; DAgger runs `--dagger_iterations` rounds instead.
 
-Each run gets its own new folder,
-`runs/[<run_name>_]<task>_<quality>_s<seed>_<date>-<time>/` (`--run_name` is an
-optional label, e.g. `--run_name=qoil_b0.25`), and nothing in it is
-overwritten. It holds:
+### Environments, experts and demos
 
-- the TensorBoard logs and `config.json` (every setting);
-- `videos/`, one evaluation episode per evaluation (with `--save_video`);
-- `checkpoints/step_<step>.pt`, the agent and optimizer state at every
-  evaluation (with `--checkpoint_model`);
-- `buffer/step_<step>.pt`, the online transitions added since the previous
-  evaluation (with `--checkpoint_buffer`). Concatenating the files in step
-  order rebuilds the buffer up to that step.
+| `--env` | Actions | Reward | Expert |
+| --- | --- | --- | --- |
+| `Pendulum-v1` (default) | 1 (torque) | dense, every step | energy swing-up + PD balance, return about -156 |
+| `MountainCarContinuous-v0` | 1 (force) | +100 at the goal, minus action cost | push along the velocity, return about 89 |
+| `robomimic:lift/ph`, `robomimic:can/ph`, ... | 7 (arm + gripper) | 10 on success, else 0 | a trained RLPD checkpoint, `--expert=...` |
 
-`<step>` matches the x-axis in TensorBoard. TensorBoard shows `training/*` (losses, Q, entropy,
-temperature every `--log_interval` steps; return, length and success per
-episode) and `evaluation/*` (mean return, length and success over
-`--eval_episodes` deterministic episodes every `--eval_interval` steps).
+Actions are always in [-1, 1] (Gymnasium tasks are rescaled). On the
+Gymnasium tasks, the hand-written expert records `--num_demos` episodes as
+the demos for BC, DAgger and `--offline_ratio`; Robomimic uses its human
+demos. `--offline_ratio` is 0 by default (pure online RL), but sparse-reward
+Robomimic tasks need demos, e.g. `--offline_ratio=0.5` as in RLPD. For
+DAgger on Lift, `--expert` can be the qoil checkout's
+`runs/corrector_lift_ph_s42_20261105-180252/checkpoints/step_0150000.pt`
+(199/200 successes).
 
-Tasks and demonstrations come from [Robomimic](https://robomimic.github.io/)
-(robosuite 1.5 versions of its low-dim datasets). `--dataset=<task>/<quality>`
-picks one, e.g. `lift/ph` (200 proficient-human demos) or `can/mh` (300
-multi-human demos). It downloads on first use to the Hugging Face cache, and
-the environment is built from the env config stored in the file.
+### What a correct implementation reaches
 
-The MDP, shared by the env and the demos:
+From a reference solution, seed 42, default flags, 1 to 4 minutes per run
+on an RTX 5070 Ti with three runs in parallel. Evaluation return on
+Pendulum-v1 (10 episodes; -150 is about as good as the expert):
 
-- Observations: Robomimic's standard low-dim keys (`object`,
-  `robot0_eef_pos`, `robot0_eef_quat`, `robot0_gripper_qpos`), concatenated.
-- Reward: `--success_reward` (default 10) on the success step, 0 otherwise.
-  Success ends the episode, so demos are cut at their first success.
-- Episodes are truncated after `--horizon` steps (default 400, as in Robomimic).
+| `--algo` | Reaches about -150 by | Notes |
+| --- | --- | --- |
+| `bc` | 4k gradient steps | 10 demos. With `--num_demos=1`, stays near -1300 |
+| `dagger` | iteration 2 | with `--num_demos=1`, iteration 3 |
+| `dqn` | 12k env steps | |
+| `ddpg` | 6k env steps | |
+| `td3` | 12k env steps | |
+| `sac` | 6k env steps | |
 
-`--offline_ratio` sets the fraction of each batch drawn from the demos
-(default 0.5); `--offline_ratio=0` trains purely online and does not load the
-demos.
+Evaluation returns swing between about -100 and -230 after that, from the
+start states drawn. BC vs DAgger with one demo is the clearest view of
+compounding errors: the BC policy drifts off the single demo trajectory and
+never recovers, while DAgger labels those drifted states.
+
+Each run gets its own folder,
+`runs/[<run_name>_]<algo>_<env>_s<seed>_<date>-<time>/`, with TensorBoard
+logs and `config.json`, plus `checkpoints/step_<step>.pt` with
+`--checkpoint_model` and `videos/` with `--save_video` (Gymnasium tasks need
+`pip install pygame` for videos).
 
 ## Code layout
 
 | File | Contents |
 | --- | --- |
-| `rlpd/agent.py` | `AgentConfig`; the tanh-Gaussian actor; the critic ensemble; `RLPDAgent.update` (critic, actor and temperature losses); `capture_cuda_graph` |
-| `rlpd/data.py` | `TransitionBuffer` (replay buffer on the GPU); Robomimic demo loading; `sample_mixed` (the 50/50 demo/online batches) |
-| `rlpd/env.py` | `RobomimicEnv`, a robosuite task as a Gymnasium env with the sparse success reward; dataset download |
-| `rlpd/train.py` | `TrainConfig` and flags, the training loop, evaluation, logging |
-
-### The CUDA graph, and what it means for new losses
-
-On a GPU, the whole update (sampling the batch, 20 critic steps, the actor and
-temperature steps) is recorded once as a CUDA graph and replayed every step.
-That removes Python and kernel-launch overhead, which dominate with networks
-this small: about 12 ms per update instead of about 50 ms run normally.
-
-A recording replays the same GPU work every time, so code inside
-`RLPDAgent.update` and `sample_mixed` must:
-
-- keep every tensor's shape fixed. Data that grows (for example a set of
-  states for reward shaping) goes in a preallocated, fixed-capacity tensor
-  with its fill level stored on the GPU, as `TransitionBuffer` does;
-- never read values back to the host (`.item()`, `.cpu()`, `if tensor:`,
-  data-dependent shapes such as boolean-mask indexing);
-- keep host-side numbers that change between steps (such as a decaying loss
-  weight) in GPU tensors updated in place, not Python floats, which are frozen
-  into the recording.
-
-Recording fails loudly on host reads. Debug new code with `--no-cuda_graph`,
-then turn the graph back on; `tests/test_agent.py` checks that replays match
-updates run normally.
-
-## Changes from upstream RLPD
-
-- JAX/Flax → PyTorch. One update from the same weights, batch and random draws
-  matches the JAX version to float32 precision; the random streams differ, so
-  runs are not bit-identical.
-- `gym` 0.23 → `gymnasium` 1.x. Environments use the five-value `step` API;
-  only true terminations (not time-limit truncations) zero the bootstrap mask.
-- D4RL → Robomimic. Training takes `--dataset` (a Robomimic task/quality),
-  builds the robosuite environment from the dataset, and logs success rate.
-- wandb → TensorBoard, with the same metric names; videos are mp4 files in
-  the run folder.
-- Removed what this project does not use: the pixel pipeline (DrQ, V-D4RL),
-  RLPD's ablation options (critic dropout, weight decay, ResNet critic,
-  p-norm), and the separate SAC and RLPD configs. The defaults are RLPD; the
-  old SAC config is `--num_qs=2 --num_min_qs=2 --hidden_dims 256 256
-  --no-critic_layer_norm --backup_entropy --utd_ratio=1 --offline_ratio=0`.
-  The removed parts are in the upstream repository if needed.
+| `rlpd/learn.py` | Everything you write (networks, agents, training loops), plus the provided experts, demos, env construction, evaluation, logging and checkpoints |
+| `rlpd/data.py` | `TransitionBuffer` (replay buffer on the GPU); Robomimic demo loading; `sample_mixed` (demo/online batches). Unchanged from main |
+| `rlpd/env.py` | `RobomimicEnv`, a robosuite task as a Gymnasium env with the sparse success reward; dataset download. Unchanged from main |
