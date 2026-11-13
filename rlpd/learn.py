@@ -302,7 +302,19 @@ class BCAgent(Agent):
     def update(self, batch: Batch) -> Dict[str, Tensor]:
         # TODO: one gradient step on the mean squared error between
         # pi(batch.observations) and batch.actions.
-        raise NotImplementedError("BCAgent.update")
+        self.optim.zero_grad()
+
+        states = batch.observations
+
+        policy_actions = self.policy(states)
+
+        policy_loss = F.mse_loss(policy_actions, batch.actions)
+
+        policy_loss.backward()
+
+        self.optim.step()
+
+        return {"BC Loss": policy_loss.detach()}
 
 
 class DQNAgent(Agent):
