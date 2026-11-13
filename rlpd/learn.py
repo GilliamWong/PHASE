@@ -283,10 +283,21 @@ class BCAgent(Agent):
         # TODO: a DeterministicPolicy and an Adam optimizer (config.lr).
         # (Variant to try later: a GaussianPolicy trained by maximizing the
         # log-likelihood of the demo actions.)
-        raise NotImplementedError("BCAgent.__init__")
+
+        self.device = device
+        self.policy = DeterministicPolicy(obs_dim, action_dim, config.hidden_dims).to(device)
+
+        self.optim = torch.optim.Adam(self.policy.parameters(), config.lr)
+        
 
     def act(self, observation: np.ndarray, explore: bool) -> np.ndarray:
-        raise NotImplementedError("BCAgent.act")
+
+        with torch.no_grad():
+            obs = torch.as_tensor(observation, device=self.device)
+
+            action = self.policy(obs.unsqueeze(0))
+
+            return action.squeeze(0).cpu().numpy()
 
     def update(self, batch: Batch) -> Dict[str, Tensor]:
         # TODO: one gradient step on the mean squared error between
