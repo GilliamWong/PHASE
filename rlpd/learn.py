@@ -148,13 +148,24 @@ class DeterministicPolicy(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: Tuple[int, ...]):
         super().__init__()
-        # TODO: an MLP from obs_dim through hidden_dims to action_dim, with
-        # an output squashed into [-1, 1].
-        raise NotImplementedError("DeterministicPolicy.__init__")
+
+        n_layers = len(hidden_dims)
+        layer_list = []
+        layer_list.append(nn.Linear(obs_dim, hidden_dims[0]))
+        layer_list.append(nn.ReLU())
+
+        for layer in range (0, n_layers - 1):
+            layer_list.append(nn.Linear(hidden_dims[layer], hidden_dims[layer + 1]))
+            layer_list.append(nn.ReLU())
+        layer_list.append(nn.Linear(hidden_dims[n_layers - 1], action_dim))
+        layer_list.append(nn.Tanh())
+
+        self.mlp_layers = nn.Sequential(*layer_list)
+
 
     def forward(self, observations: Tensor) -> Tensor:
         """(batch, obs_dim) -> (batch, action_dim), every entry in [-1, 1]."""
-        raise NotImplementedError("DeterministicPolicy.forward")
+        return self.mlp_layers(observations)
 
 
 class GaussianPolicy(nn.Module):
