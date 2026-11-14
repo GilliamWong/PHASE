@@ -487,22 +487,41 @@ def train_dagger(config: Config, agent: Agent, demos: TransitionBuffer, env, eva
         if iteration == config.dagger_iterations:
             break
 
-        # TODO: roll out config.dagger_episodes episodes in `env`
-        # (observation, _ = env.reset(); step until terminated or truncated).
-        # At every step:
-        # - label the state with the expert's action. The expert maps a batch
-        #   of observations to actions, so
-        #   expert(torch.as_tensor(observation, device=agent.device)[None])
-        #   gives a (1, action_dim) tensor;
-        # - add (state, expert action) to `dataset` with dataset.add(...);
-        # - execute the expert's action with probability
-        #   beta = config.dagger_beta ** (iteration + 1), and otherwise the
-        #   learner's, agent.act(observation, explore=False). (Ross et al.
-        #   use beta_1 = 1, a first round of pure expert data; the demos
-        #   play that role here.)
-        # Optionally log the rollouts' mean return (info["episode"]["r"] at
-        # each episode's last step) with run.log("training", {...}, iteration).
-        todo("DAgger: collect expert-labeled rollouts")
+        
+        for episode in range(config.dagger_episodes):
+            #for each dagger episode we want to rollout the current policy
+            #but for each action use the expert action for the state transition with prob beta
+            #then relabel all states with expert actions and add ot the dataset
+
+            observation, _ = env.reset()
+            done = False
+
+            while not done:
+
+                learner_action = agent.act(observation, explore = False)
+
+                with torch.no_grad():
+                    expert_action = expert(torch.as_tensor(observation, device=agent.device).unsqueeze(0))
+                expert_action = expert_action.squeeze(0).cpu().numpy()
+
+                rand = np.random.random()
+
+                if rand < (config.dagger_beta ** (iteration + 1)):
+                    chosen_action = expert_action
+                else:
+                    chosen_action = learner_action
+
+                next_obs, reward, terminated, truncated, info = env.step(chosen_action)
+
+                done = terminated or truncated
+
+                #not actually used in BC, but included for correctness
+                mask = 0 if terminated else 1
+
+                dataset.add(observation, expert_action, reward, mask, next_obs)
+
+                observation = next_obs
+
 
 
 def train_online(config: Config, agent: Agent, demos: Optional[TransitionBuffer], env, eval_env, run):
