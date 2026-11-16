@@ -224,11 +224,25 @@ class DiscreteQNetwork(nn.Module):
     ):
         super().__init__()
         # TODO: an MLP from obs_dim through hidden_dims to action_dim * num_bins.
-        raise NotImplementedError("DiscreteQNetwork.__init__")
+        n_layers = len(hidden_dims)
+        layer_list = []
+        layer_list.append(nn.Linear(obs_dim, hidden_dims[0]))
+        layer_list.append(nn.ReLU())
+
+        for layer in range (0, n_layers - 1):
+            layer_list.append(nn.Linear(hidden_dims[layer], hidden_dims[layer + 1]))
+            layer_list.append(nn.ReLU())
+        layer_list.append(nn.Linear(hidden_dims[n_layers - 1], action_dim * num_bins))
+
+        self.mlp_layers = nn.Sequential(*layer_list)
+        self.action_dim = action_dim
+        self.num_bins = num_bins
 
     def forward(self, observations: Tensor) -> Tensor:
         """(batch, obs_dim) -> (batch, action_dim, num_bins)."""
-        raise NotImplementedError("DiscreteQNetwork.forward")
+        out = self.mlp_layers(observations)
+
+        return out.reshape(observations.shape[0], self.action_dim, self.num_bins)
 
 
 # ---------------------------------------------------------------------------
