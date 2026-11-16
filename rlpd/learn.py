@@ -370,6 +370,12 @@ class DQNAgent(Agent):
 
         self.bins = torch.linspace(-1, 1, config.num_bins, device = device)
 
+        self.action_count = 0 #in training this essentially tracks train steps
+
+        self.config = config
+
+        self.action_dim = action_dim
+
     def act(self, observation: np.ndarray, explore: bool) -> np.ndarray:
 
         with torch.no_grad():
@@ -384,7 +390,21 @@ class DQNAgent(Agent):
             #index into the bins for the specific action for each action dim
             action = self.bins[action.squeeze(0)]
 
-            return action.cpu().numpy()
+        if explore:
+            #we want to explore differently depending on where we are during training, 
+            #where exploration is just taking some random action
+            fraction = min(1, self.action_count / self.config.epsilon_decay_steps)
+            epsilon = self.config.epsilon_start + fraction * (self.config.epsilon_end - self.config.epsilon_start)
+
+            rand_prob = np.random.random()
+
+            #if random action, then we assign a random bin to each action_dim and return that instead
+            if rand_prob < epsilon:
+                action = self.bins[torch.randint(self.config.num_bins, (self.action_dim,), device = self.device)]
+
+            self.action_count += 1
+        
+        return action.cpu().numpy()
 
     def update(self, batch: Batch) -> Dict[str, Tensor]:
         raise NotImplementedError("DQNAgent.update")
