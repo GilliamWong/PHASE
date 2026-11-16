@@ -361,10 +361,30 @@ class DQNAgent(Agent):
 
     def __init__(self, obs_dim: int, action_dim: int, config: Config, device: torch.device):
         super().__init__()
-        raise NotImplementedError("DQNAgent.__init__")
+
+        self.device = device
+
+        self.q = DiscreteQNetwork(obs_dim, action_dim, config.num_bins, config.hidden_dims).to(device)
+
+        self.optim = torch.optim.Adam(self.q.parameters(), config.lr)
+
+        self.bins = torch.linspace(-1, 1, config.num_bins, device = device)
 
     def act(self, observation: np.ndarray, explore: bool) -> np.ndarray:
-        raise NotImplementedError("DQNAgent.act")
+
+        with torch.no_grad():
+            obs = torch.as_tensor(observation, device = self.device)
+
+            #this would be 1 action_dim num_bins
+            action = self.q(obs.unsqueeze(0))
+
+            #we take the argmax of this so we get the bin with the highest Q value for each action dim
+            action = action.argmax(dim=-1) #so 1 action_dim 
+
+            #index into the bins for the specific action for each action dim
+            action = self.bins[action.squeeze(0)]
+
+            return action.cpu().numpy()
 
     def update(self, batch: Batch) -> Dict[str, Tensor]:
         raise NotImplementedError("DQNAgent.update")
