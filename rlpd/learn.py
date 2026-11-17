@@ -376,6 +376,11 @@ class DQNAgent(Agent):
 
         self.action_dim = action_dim
 
+        #update counter for the target network
+        self.update_counter = 0
+
+        self.target_network = copy.deepcopy(self.q)
+
     def act(self, observation: np.ndarray, explore: bool) -> np.ndarray:
 
         with torch.no_grad():
@@ -407,8 +412,40 @@ class DQNAgent(Agent):
         return action.cpu().numpy()
 
     def update(self, batch: Batch) -> Dict[str, Tensor]:
-        raise NotImplementedError("DQNAgent.update")
+        self.optim.zero_grad()
+        q_values = self.q(batch.observations) #this shoudl already be binned
 
+        #this gets the indices for the actions that led from the first to the next state, it's what we're training for
+        target_value_indices = (batch.actions.unsqueeze(-1) - self.bins).abs().argmin(dim=-1) #add last dim, so this is B A 
+
+        with torch.no_grad():
+            next_q_target = self.target_network(batch.next_observations) # B A num_bins
+            if self.config.double_dqn:
+                # the online network picks each dimension's bin, the target network scores it
+                next_bins = self.q(batch.next_observations).argmax(dim=-1) # B A
+                next_chosen = F.one_hot(next_bins, self.config.num_bins)
+                future_values = (next_q_target * next_chosen).sum(dim=-1).mean(dim=-1) #size B
+            else:
+                future_values = next_q_target.max(dim=-1).values.mean(dim=-1) #size B
+
+        td_target = batch.rewards + (self.config.discount * batch.masks * future_values)
+
+        #shape B A num_bins, one hot tensors for each action dim that give chosen bin from batch
+        target_mask = F.one_hot(target_value_indices, self.config.num_bins)
+
+        loss = F.smooth_l1_loss((q_values * target_mask).sum(dim=-1).mean(dim=-1), td_target)
+
+        loss.backward()
+
+        self.optim.step()
+
+        self.update_counter += 1
+
+        if self.update_counter >= self.config.target_update_interval:
+            self.update_counter = 0
+            self.target_network.load_state_dict(self.q.state_dict())
+
+        return {"Loss": loss.detach()}
 
 class DDPGAgent(Agent):
     """DDPG (Lillicrap et al., 2016, https://arxiv.org/abs/1509.02971).
