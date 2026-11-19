@@ -208,12 +208,24 @@ class QNetwork(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: Tuple[int, ...]):
         super().__init__()
-        # TODO: an MLP from obs_dim + action_dim through hidden_dims to 1.
-        raise NotImplementedError("QNetwork.__init__")
+
+        n_layers = len(hidden_dims)
+        layer_list = []
+        layer_list.append(nn.Linear(obs_dim + action_dim, hidden_dims[0]))
+        layer_list.append(nn.ReLU())
+
+        for layer in range (0, n_layers - 1):
+            layer_list.append(nn.Linear(hidden_dims[layer], hidden_dims[layer + 1]))
+            layer_list.append(nn.ReLU())
+        layer_list.append(nn.Linear(hidden_dims[n_layers - 1], 1))
+
+        self.mlp_layers = nn.Sequential(*layer_list)
 
     def forward(self, observations: Tensor, actions: Tensor) -> Tensor:
         """(batch, obs_dim), (batch, action_dim) -> (batch,)."""
-        raise NotImplementedError("QNetwork.forward")
+        out = self.mlp_layers(torch.cat([observations, actions], dim=-1))  # B 1
+
+        return out.squeeze(-1)
 
 
 class DiscreteQNetwork(nn.Module):
