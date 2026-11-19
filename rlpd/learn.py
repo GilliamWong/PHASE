@@ -629,7 +629,10 @@ def train_online(config: Config, agent: Agent, demos: Optional[TransitionBuffer]
         # TODO: choose the action: uniformly random (env.action_space.sample())
         # for the first config.start_training steps, to fill the buffer before
         # any update, then agent.act(observation, explore=True).
-        action = todo("train_online: choose the action")
+        if step < config.start_training:
+            action = env.action_space.sample()
+        else:
+            action = agent.act(observation, explore = True)
 
         next_observation, reward, terminated, truncated, info = env.step(action)
 
@@ -638,7 +641,8 @@ def train_online(config: Config, agent: Agent, demos: Optional[TransitionBuffer]
         # term of the TD target: which of terminated (the task ended, e.g.
         # success) and truncated (the time limit) should stop bootstrapping,
         # and why?
-        todo("train_online: store the transition")
+        mask = 0.0 if terminated else 1.0
+        online.add(observation, action, reward, mask, next_observation)
 
         observation = next_observation
         if terminated or truncated:
@@ -652,7 +656,9 @@ def train_online(config: Config, agent: Agent, demos: Optional[TransitionBuffer]
             # TODO: run config.utd_ratio updates, each on a fresh batch from
             # sample_batch(demos, online, demos_per_batch, online_per_batch),
             # and keep the last update's metrics.
-            metrics = todo("train_online: update the agent")
+            for update in range(config.utd_ratio):
+                batch = sample_batch(demos, online, demos_per_batch, online_per_batch)
+                metrics = agent.update(batch)
             if step % config.log_interval == 0:
                 run.log("training", metrics, step)
 
