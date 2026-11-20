@@ -100,6 +100,8 @@ class RobomimicEnv(gym.Env):
         self._placement_rng = np.random.RandomState()
         self._num_steps = 0
 
+        self.truncate_next_step = False
+
     @staticmethod
     def _get_obs_dict(raw_obs: Mapping[str, np.ndarray]) -> dict:
         obs = dict(raw_obs)
@@ -119,6 +121,7 @@ class RobomimicEnv(gym.Env):
         with _use_as_global_numpy_rng(self._placement_rng):
             raw_obs = self._env.reset()
         self._num_steps = 0
+        self.truncate_next_step = False
         return flatten_observation(self._get_obs_dict(raw_obs)), {}
 
     def step(self, action):
@@ -127,7 +130,9 @@ class RobomimicEnv(gym.Env):
         success = bool(self._env._check_success())
         info = dict(info, is_success=success)
         reward = self._success_reward if success else 0.0
-        truncated = self._num_steps >= self._horizon and not success
+        # truncate_next_step lets the caller end the episode early as a
+        # time-limit cutoff (RaC's Rule 2); it is cleared at reset.
+        truncated = (self._num_steps >= self._horizon or self.truncate_next_step) and not success
         obs = flatten_observation(self._get_obs_dict(raw_obs))
         return obs, reward, success, truncated, info
 

@@ -28,7 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 from rlpd.agent import AgentConfig, RLPDAgent, capture_cuda_graph
 from rlpd.data import TransitionBuffer, load_demo_buffer, sample_mixed
 from rlpd.env import DEFAULT_HORIZON, RobomimicEnv, download_dataset, read_env_args, seed_env
-from rlpd.human import HumanConfig, SyntheticHuman, critic_value
+from rlpd.human import RECOVERY, HumanConfig, SyntheticHuman, critic_value
 
 
 @dataclass
@@ -209,17 +209,6 @@ def main():
     # The loop below runs max_steps + 1 steps, so every transition fits.
     online = TransitionBuffer(obs_dim, action_dim, config.max_steps + 1, device)
 
-    human = None
-    if human_config.corrector:
-        corrector = RLPDAgent.from_checkpoint(human_config.corrector, device)
-        if (corrector.obs_dim, corrector.action_dim) != (obs_dim, action_dim):
-            raise ValueError(f"{human_config.corrector} was trained on a different task")
-        value = None
-        if human_config.gate == "progress":
-            reference = RLPDAgent.from_checkpoint(human_config.progress_reference, device)
-            value = critic_value(reference)
-        human = SyntheticHuman(human_config, corrector, np.random.default_rng(config.seed), value)
-        human.reset()
     demos_per_minibatch = int(config.batch_size * config.offline_ratio)
     online_per_minibatch = config.batch_size - demos_per_minibatch
     use_demos = demos_per_minibatch > 0 or config.pretrain_steps > 0
@@ -231,6 +220,27 @@ def main():
             dataset_path, config.success_reward, device, config.num_demos,
             as_interventions=config.demos_as_interventions,
         )
+    human = None
+    if human_config.corrector:
+        corrector = RLPDAgent.from_checkpoint(human_config.corrector, device)
+        if (corrector.obs_dim, corrector.action_dim) != (obs_dim, action_dim):
+            raise ValueError(f"{human_config.corrector} was trained on a different task")
+        value = None
+        if human_config.gate == "progress":
+            reference = RLPDAgent.from_checkpoint(human_config.progress_reference, device)
+            value = critic_value(reference)
+        demo_observations = demo_actions = None
+        if human_config.style == "rac" and demos is not None:
+            rows = demos.rows[: len(demos)].cpu().numpy()
+            demo_observations = rows[:, :obs_dim]
+            demo_actions = rows[:, obs_dim : obs_dim + action_dim]
+        human = SyntheticHuman(
+            human_config, corrector, np.random.default_rng(config.seed), value,
+            demo_observations, demo_actions,
+        )
+    # Each online step's phase (rlpd.human: 0 learner, 1 recovery, 2
+    # correction), saved to phases.npy; row i matches online buffer row i.
+    phases = []
     # Q-OIL's D_int: the intervention transitions, sampled for the BC term.
     interventions = None
     if agent_config.bc_weight > 0:
@@ -277,6 +287,7 @@ def main():
     online_update = None
     buffer_rows_saved = 0
     episode_intervention_steps = total_intervention_steps = 0
+    episode_recovery_steps = 0
     # Per action dimension, how many intervention actions so far are within
     # bc_action_eps of +-1, where BC clamps them (see Actor.log_prob).
     clamped_intervention_actions = np.zeros(action_dim)
@@ -290,6 +301,10 @@ def main():
         step = i + config.pretrain_steps
         human_action = human.act(observation) if human is not None else None
         intervened = human_action is not None
+        if human is not None:
+            phases.append(human.phase)
+            # RaC's Rule 2: the episode ends (as a truncation) with the takeover.
+            env.unwrapped.truncate_next_step = human_config.end_after_takeover and human.hands_back
         if intervened:
             action = human_action
         elif i < config.start_training:
@@ -314,6 +329,7 @@ def main():
             interventions.add(*transition, intervention=True)
         if intervened:
             episode_intervention_steps += 1
+            episode_recovery_steps += human.phase == RECOVERY
             clamped_intervention_actions += np.abs(action) >= clamp_limit
         observation = next_observation
 
@@ -333,13 +349,14 @@ def main():
                     intervention_steps=episode_intervention_steps,
                     intervention_fraction=episode_intervention_steps / episode["l"],
                     total_intervention_steps=total_intervention_steps,
+                    recovery_steps=episode_recovery_steps,
                 )
                 if total_intervention_steps > 0:
                     clamped = clamped_intervention_actions / total_intervention_steps
                     episode_metrics["intervention_clamped_fraction"] = clamped.mean()
                     for dim, fraction in enumerate(clamped):
                         episode_metrics[f"intervention_clamped_fraction_dim{dim}"] = fraction
-            episode_intervention_steps = 0
+            episode_intervention_steps = episode_recovery_steps = 0
             log_scalars(writer, "training", episode_metrics, step)
             recent_successes.append(info["is_success"])
             progress_stats["train_success"] = f"{np.mean(recent_successes):.2f}"
@@ -351,6 +368,8 @@ def main():
             log_scalars(writer, "training", actor_gradient_norms(), step)
 
         if i % config.eval_interval == 0:
+            if human is not None:
+                np.save(os.path.join(run_dir, "phases.npy"), np.asarray(phases, dtype=np.int8))
             video_path = None
             if video_dir is not None:
                 video_path = os.path.join(video_dir, f"evaluation_{step:07d}.mp4")
