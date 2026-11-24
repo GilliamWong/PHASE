@@ -12,7 +12,7 @@ Per group (mean +- standard error over seeds):
 Also prints success at matched human-effort budgets (--budgets).
 
 Usage:
-  python scripts/rac_results.py --ours runs_cap100 --william will_runs \
+  python scripts/rac_results.py --ours runs_cap100 runs_cap100_long --william will_runs \
       --out Baselines/rac_results
 """
 
@@ -25,7 +25,7 @@ import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 WILLIAM_PREFIX = {"lift": "f10_cap100_", "can": "can_cap100_"}
-ORDER = ["W:hil", "W:bcrl", "repro_hil", "rac_hil", "rac_bcrl", "rule2_hil"]
+ORDER = ["W:hil", "W:bcrl", "repro_hil", "long_hil", "rac_hil", "rac_bcrl", "rule2_hil"]
 LABEL = {
     "W:hil": "William: corrector human, HIL",
     "W:bcrl": "William: corrector human, BC+RL",
@@ -33,6 +33,7 @@ LABEL = {
     "rac_hil": "RaC human, HIL",
     "rac_bcrl": "RaC human, BC+RL",
     "rule2_hil": "Rule 2 only, HIL",
+    "long_hil": "Ours: corrector human, HIL, 150k steps",
 }
 
 
@@ -54,7 +55,7 @@ def load(run_dir):
 
 def groups_for(task, ours, william):
     groups = collections.defaultdict(list)
-    for d in sorted(glob.glob(os.path.join(ours, task, "*"))):
+    for d in sorted(d for o in ours for d in glob.glob(os.path.join(o, task, "*"))):
         name = os.path.basename(d).split(f"_{task}_ph_s")[0]
         groups[name].append(load(d))
     prefix = WILLIAM_PREFIX[task]
@@ -162,7 +163,7 @@ def plot(task, groups, max_step, path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ours", default="runs_cap100")
+    parser.add_argument("--ours", nargs="+", default=["runs_cap100", "runs_cap100_long"])
     parser.add_argument("--william", default="will_runs")
     parser.add_argument("--out", default="Baselines/rac_results")
     parser.add_argument("--max_step", type=int, default=100000)
@@ -178,7 +179,7 @@ def main():
         tables.append(table(task, rows))
         for budget in args.budgets:
             print(matched_effort(task, groups, budget))
-        plot(task, groups, args.max_step, os.path.join(args.out, f"cap100_{task}.png"))
+        plot(task, groups, 10**9, os.path.join(args.out, f"cap100_{task}.png"))
     text = "\n\n".join(tables)
     with open(os.path.join(args.out, "cap100_tables.md"), "w") as f:
         f.write(text + "\n")

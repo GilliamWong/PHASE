@@ -45,32 +45,48 @@ As in William's runs, BC+RL does worse than HIL on Lift.
 3. **Rule 2 (end the episode after a takeover) alone gives the whole gain.**
    On both tasks it matches or beats the full RaC human, with fewer human
    steps. The scripted recovery adds nothing.
-4. **Per human step, the Can gain disappears.** Ending episodes early means
-   more episodes, so more takeovers per environment step: Rule 2 uses about
-   1.4x William's human effort, and RaC about 1.7x. At the same human budget
-   (≤18k human steps), the success of the last 3 evaluations is:
-   - William's human: 0.16 ± 0.04
-   - Rule 2 only: 0.13 ± 0.03
-   - RaC human: 0.06 ± 0.04
+4. **Per human step, Rule 2 still wins, but by less, and only after about 20k
+   human steps.** Ending episodes early means more episodes, so more
+   takeovers per environment step: Rule 2 uses about 1.4x William's human
+   effort per environment step, and RaC about 1.7x. To compare at equal effort
+   on Can, we also ran William's human for 150k steps (`long_hil`, 3 seeds),
+   which reaches 28.6k human steps. Success over the last 3 evaluations within
+   each human-step budget:
 
-   At ≤20k human steps they score 0.16, 0.19 and 0.11 respectively, which is
-   within noise. On Lift, Rule 2 is still somewhat better at a matched budget
-   (≤10k: 0.58 vs 0.40; ≤20k: 0.93 vs 0.85), but the RaC human is not.
+   | Human steps ≤ | William's human (150k run) | Rule 2 only | RaC human |
+   |---|---|---|---|
+   | 18k | 0.12 ± 0.06 | 0.13 ± 0.03 | 0.06 ± 0.04 |
+   | 20k | 0.12 ± 0.05 | 0.19 ± 0.03 | 0.11 ± 0.07 |
+   | 24k | 0.28 ± 0.07 | 0.36 ± 0.11 | 0.27 ± 0.05 |
+   | 28k | 0.31 ± 0.03 | **0.52 ± 0.05** | 0.36 ± 0.09 |
+
+   Up to about 20k human steps, all three are within noise. By 28k, Rule 2 is
+   clearly ahead (0.52 vs 0.31). The full RaC human is no better than
+   William's at any budget, so the scripted recovery wastes human steps. On
+   Lift, Rule 2 is also somewhat better at a matched budget (≤10k: 0.58 vs
+   0.40; ≤20k: 0.93 vs 0.85), and the RaC human is not.
+
    Compare HIL with HIL only here. BC+RL runs trigger far fewer takeovers, so
    at a small human budget they have trained for many more environment steps.
-   `scripts/rac_results.py` prints these matched-budget numbers.
+   `scripts/rac_results.py --budgets ...` prints these numbers.
 5. **BC+RL stays worse than HIL** under both humans, as in William's results.
 
-For PHASE, this run gives no evidence that cloning or targeting the recovery
-segment is what helps. What helped was the extra human-guided resets. It is
-also a warning: a synthetic human that intervenes more will look better unless
-results are plotted against human effort. We should report human-effort
-curves (right panels below) for every method.
+For PHASE:
+- **No evidence that the recovery segment is what helps.** A recovery added in
+  front of the correction costs human steps and buys nothing.
+- **Ending the episode after a takeover helps.** It helps per environment step, and on Can also per human step once the learner
+  starts succeeding. A likely reason is that the learner's own behavior right
+  after a takeover adds little useful data. A PHASE-style method could get the
+  same benefit by truncating or down-weighting those post-takeover segments.
+- **Methods must be compared against human effort, not only environment
+  steps.** A synthetic human that intervenes more will otherwise look better.
+  Report human-effort curves (right panels below) for every method.
 
-Caveat: William's runs stop at ~20k human steps because they end at 100k
-environment steps, so the effort comparison only covers up to that point.
-`scripts/klone/long_hil_cap100.sbatch` reruns William's human on Can to 150k
-steps (3 seeds) to see whether it keeps pace with Rule 2 past 20k human steps.
+Caveats:
+- 3 seeds and 10-episode evaluations.
+- On Can, only William's human was extended, to 150k steps. The Rule 2 and RaC
+  runs end at 100k (28k and 34k human steps), so no comparison goes past 28k.
+- Only Lift and Can.
 
 ![Lift](cap100_lift.png)
 ![Can](cap100_can.png)
@@ -102,6 +118,10 @@ standard error over seeds. Each evaluation uses 10 episodes.
 | RaC human, HIL | 3 | 0.19 ± 0.01 | 0.46 ± 0.10 | 33661 ± 2006 |
 | RaC human, BC+RL | 3 | 0.05 ± 0.03 | 0.13 ± 0.06 | 17532 ± 1310 |
 | Rule 2 only, HIL | 3 | 0.18 ± 0.02 | 0.57 ± 0.03 | 27906 ± 226 |
+| Ours: corrector human, HIL, run to 150k (`long_hil`) | 3 | 0.13 ± 0.01 | 0.39 ± 0.01 | 28629 ± 229 |
+
+`long_hil` is reported at 150k steps; at 100k it scores 0.05 ± 0.01 avg and
+0.16 ± 0.07 final, with 19449 ± 304 human steps.
 
 ### Setup
 
@@ -123,3 +143,4 @@ New runs:
 | `rac_hil` | 42–44 | Full RaC protocol, HIL learner |
 | `rac_bcrl` | 42–44 | Full RaC protocol, BC+RL learner |
 | `rule2_hil` | 42–44 | Rule 2 alone (no scripted recovery), so we can tell whether recovery or early termination drives any gain |
+| `long_hil` (Can) | 42–44 | William's human run to 150k steps (`long_hil_cap100.sbatch`), so the human-effort comparison reaches ~28k steps |

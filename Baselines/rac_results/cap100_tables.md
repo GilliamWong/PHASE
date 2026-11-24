@@ -16,6 +16,7 @@
 | William: corrector human, HIL | 6 | 100k | 0.06 ± 0.01 | 0.17 ± 0.04 | 19770 ± 617 |
 | William: corrector human, BC+RL | 6 | 100k | 0.03 ± 0.01 | 0.08 ± 0.02 | 9351 ± 447 |
 | Ours: corrector human, HIL (repro) | 1 | 100k | 0.05 | 0.10 | 18207 |
+| Ours: corrector human, HIL, 150k steps | 3 | 100k | 0.05 ± 0.01 | 0.16 ± 0.07 | 19449 ± 304 |
 | RaC human, HIL | 3 | 100k | 0.19 ± 0.01 | 0.46 ± 0.10 | 33661 ± 2006 |
 | RaC human, BC+RL | 3 | 100k | 0.05 ± 0.03 | 0.13 ± 0.06 | 17532 ± 1310 |
 | Rule 2 only, HIL | 3 | 100k | 0.18 ± 0.02 | 0.57 ± 0.03 | 27906 ± 226 |
